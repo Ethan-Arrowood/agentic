@@ -1,10 +1,10 @@
 ---
 name: nodejs-review-queue
-description: Review queue for nodejs/node PRs relevant to the user's subsystem teams. Node.js does not assign reviewers directly — the nodejs-github-bot posts a "Review requested:" comment @-mentioning the relevant @nodejs/<team>s and auto-applies subsystem labels from the "<subsystem>:" title prefix. This skill finds open PRs whose bot review-request mentions a team the user belongs to, then works through them one at a time in chat. READ-ONLY: it never posts to GitHub. Use when the user says "node review queue", "what node PRs should I review", or wants to triage their nodejs/node review backlog.
+description: Review queue for nodejs/node PRs relevant to the user's subsystem teams. Node.js does not assign reviewers directly — the nodejs-github-bot posts a "Review requested:" comment @-mentioning the relevant @nodejs/<team>s and auto-applies subsystem labels from the "<subsystem>:" title prefix. This skill finds open PRs whose bot review-request mentions a team the user belongs to, then works through them one at a time in chat. It has two modes: a review queue (bot-requested PRs) and a cleanup sweep (wider net over networking-labeled PRs, ranked by author staleness, to triage abandoned/stalled PRs). READ-ONLY: it never posts to GitHub. Use when the user says "node review queue", "what node PRs should I review", wants to triage their nodejs/node review backlog, or wants to clean up stalled/abandoned networking PRs.
 metadata:
   author: Ethan Arrowood
   tags: nodejs, github, code-review, pull-requests, networking, workflow
-  version: 1.7.0
+  version: 1.8.0
 user-invocable: true
 allowed-tools:
   - Bash
@@ -16,6 +16,13 @@ allowed-tools:
 # Node.js Review Queue
 
 Surface and triage open `nodejs/node` PRs that are relevant to the user, one at a time, in a single shared session. Built around how Node.js actually routes reviews — there are no direct reviewer assignments.
+
+## Two modes
+
+1. **Review queue** (default) — PRs where the `nodejs-github-bot` requested one of the user's teams. Deep, one-at-a-time review. This is the `## Procedure` below.
+2. **Cleanup sweep** — a wider net over *all* open PRs carrying the user's networking subsystem labels, ranked by **author staleness**, to triage abandoned/stalled PRs. Batch-oriented. See `## Cleanup sweep (stale-triage mode)`.
+
+Pick by intent: "what should I review" → mode 1; "help me clean up stalled networking PRs" / "clear the backlog" → mode 2. Both are **read-only** — the user applies every label / posts every comment themselves.
 
 ## Hard rules (do not violate)
 
@@ -190,3 +197,63 @@ done
 > ⚠️ **gh jq gotcha:** `gh api --jq` does not accept `--arg`; it silently errors and returns nothing (looks like "none"). Use an exported env var via `env.ME` inside the query, as above.
 
 Present a roll-up grouped by disposition at queue completion or on request ("what have I reviewed / what's left"), and flag any PR you discussed in chat that has **no review on record** yet — so nothing the user meant to submit slips through.
+
+---
+
+## Cleanup sweep (stale-triage mode)
+
+A wider net for backlog cleanup: find open networking PRs that are abandoned/stalled and surface them so the user can apply `stalled` (or ping). Read-only — the skill never labels or comments.
+
+### C1. Discover by subsystem label (not review-request)
+
+Union open, non-draft, not-authored-by-user PRs across the networking labels. `gh pr list --label` is AND across repeats, so loop per label and dedupe:
+
+```bash
+REPO=nodejs/node; ME=$(gh api user --jq .login); : > /tmp/net-prs.txt
+for L in net http https http2 quic dgram tls dns stream; do
+  gh pr list --repo "$REPO" --state open --label "$L" --limit 100 \
+    --json number,title,createdAt,author,isDraft,labels \
+    --jq ".[] | select(.author.login != \"$ME\") | select(.isDraft==false) | [.number, .createdAt[:10], .author.login, ([.labels[].name]|join(\",\"))] | @tsv" 2>/dev/null
+done | sort -u > /tmp/net-prs.txt
+awk -F'\t' '!seen[$1]++' /tmp/net-prs.txt | wc -l   # unique count
+```
+
+### C2. Rank by AUTHOR staleness — never `updatedAt`
+
+⚠️ **`updatedAt` is worthless for staleness here.** A mass bot/label sweep (observed: everything bumped to a single date like `2026-04-28`) and routine collaborator/bot comments keep `updatedAt` recent on PRs whose author vanished years ago. **The GitHub `updated:<date>` search filter has the same flaw — don't use it.** Rank by `createdAt` (oldest first) and confirm staleness with the **last commit date** (`.commits[-1].committedDate`), which reflects real author engagement:
+
+```bash
+for n in $(awk -F'\t' '!seen[$1]++{print $2"\t"$1}' /tmp/net-prs.txt | sort | head -30 | cut -f2); do
+  gh pr view "$n" --repo "$REPO" --json number,createdAt,commits,labels,mergeable \
+    --jq '"#\(.number) created:\(.createdAt[:10]) lastCommit:\(.commits[-1].committedDate[:10]) stalled:\(([.labels[].name]|index("stalled"))!=null) conflict:\(.mergeable=="CONFLICTING")"'
+  gh api "repos/$REPO/pulls/$n" --jq '"   assoc:\(.author_association)"'   # authorAssociation is REST-only, NOT a gh pr view field
+done
+```
+
+Stalled = last commit >6 months ago. Also capture: already-`stalled`-labeled (skip — automation owns it), `CONFLICTING`, and `author_association`.
+
+### C3. Split by author association — the etiquette fork
+
+This is the key triage judgment:
+- **`CONTRIBUTOR` / `FIRST_TIME_CONTRIBUTOR` / `NONE`** → external author, almost certainly abandoned. Age alone satisfies the "check if they intend to continue" courtesy. **Clean `stalled` target.**
+- **`MEMBER` / `COLLABORATOR`** → a core collaborator who may have *parked* the work intentionally (e.g. a `semver-major` awaiting a window, or a `review wanted` PR). **Do not treat as abandoned** — surface separately and suggest a light "still pursuing this?" ping, not an auto-`stalled`.
+
+Present two tables: 🧹 clean stalled targets (oldest first, with the `stalled`-label recommendation) and 🤝 collaborator-parked (ping/leave). Never fold them together.
+
+### C4. State ledger — track triage across sessions
+
+A sweep spans many sessions; don't re-surface PRs the user already handled. Maintain `~/.claude/nodejs-review-queue/state.json` (outside the skill repo — it's personal runtime state, not skill content):
+
+```json
+{ "swept": { "63965": { "disposition": "stalled|pinged|kept|reviewed", "headSha": "<sha>", "at": "<iso>" } } }
+```
+
+On each sweep, load it and **omit** PRs already dispositioned — unless the head sha changed (author pushed → revived, re-surface as `🔁 REVIVED`). Dispositions are the user's reported action; since the skill never posts, reconcile against GitHub where possible (is the `stalled` label actually present now?). Create the dir on first run: `mkdir -p ~/.claude/nodejs-review-queue`.
+
+### C5. Badges (shared with review mode)
+
+Encode priority as badges so it reads regardless of position: `🔴 PATCH`, `🔁 REVIVED (+N)`, `⚠️ CI`, `⏳ <N>y stale`, `🤝 collaborator`, `🏷️ already-stalled`, `⚔️ CONFLICTING`.
+
+### C6. Scale honestly
+
+The full networking set is large (100+ PRs). Don't silently cap — say how many were found, how many you triaged this pass, and offer to continue the sweep in batches (e.g. oldest 30 at a time). Log what was deferred.

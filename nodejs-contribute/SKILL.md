@@ -26,6 +26,14 @@ For **reviewing/triaging other people's** PRs (read-only), use the `nodejs-revie
 
 - Clone lives at `~/dev/nodejs/node`. Remotes: **`origin` = the user's fork** (`Ethan-Arrowood/node`), **`upstream` = `nodejs/node`**. PR refs live on `upstream`.
 - Resting state is latest `main`: `git fetch upstream main && git checkout main && git pull --ff-only upstream main`. Reconfigure + rebuild after any pull that brings commits (see Building).
+- ⚠️ **Fix branch tracking immediately after creating a work branch.** `git worktree add … -b <branch> upstream/main` sets the new branch to track **`upstream/main`**, not the fork. That is actively dangerous: any `git pull`, or VS Code's *Sync Changes* button, then merges `nodejs/node` main **into the PR branch**, producing a merge commit that nodejs rejects — and `git status` reports nonsense like *"Your branch and 'upstream/main' have diverged, and have 2 and 8 different commits"* (2 = your commits, 8 = upstream's since your base). After the first push, always:
+  ```bash
+  git push -u origin <branch>          # or, if already pushed:
+  git branch --set-upstream-to=origin/<branch> <branch>
+  ```
+  Check with `git rev-parse --abbrev-ref <branch>@{upstream}` — it must print `origin/<branch>`. Only `main` should track `upstream/main`.
+- **Keep `origin/main` current.** A stale fork main (it drifted 2281 commits once) is what makes GitHub's "Update branch" button offer bogus conflicts and tempt a merge commit. `git push origin main` whenever main is fast-forwarded.
+- **Don't chase the tip when rebasing.** nodejs/node lands ~1 commit per 30 min, so any base is hours-old immediately; that is fine. Jenkins `node-test-pull-request` rebases onto current `origin/main` itself (`REBASE_ONTO`) before building. Rebase when the PR is genuinely `CONFLICTING`/far behind, not to match `upstream/main` exactly. Verify with `git merge-tree --write-tree upstream/main HEAD` rather than by comparing SHAs.
 - **Commit trailers (DCO) — NOT `Co-Authored-By`.** Every commit ends with:
   ```
   Assisted-by: Claude <model>
@@ -43,10 +51,48 @@ For **reviewing/triaging other people's** PRs (read-only), use the `nodejs-revie
 ## Building — `scripts/build-node.sh`
 
 ```bash
-CC="ccache cc" CXX="ccache c++" ./configure --ninja --node-builtin-modules-path "$(pwd)"
+CC="ccache cc" CXX="ccache c++" ./configure --ninja --experimental-quic --node-builtin-modules-path "$(pwd)"
 ninja -C out/Release node
 ```
 Run it in the **background**, stream output directly (never pipe through `tail` — it hides progress). Reconfigure after every pull that adds/removes files or changes gyp gating; an incremental `ninja` against a stale graph fails with confusing errors.
+
+⚠️ **Experimental subsystems are gated at CONFIGURE time, not just by a runtime flag.** `configure_quic()`/`configure_dtls()` in `configure.py` set `node_use_quic`/`node_use_dtls`, and without the configure flag the module is **compiled out entirely**:
+- `import 'node:quic'` throws `ERR_UNKNOWN_BUILTIN_MODULE` — with nothing pointing at the build as the cause,
+- `process.features.quic` is `false` and `process.versions.ngtcp2` is empty,
+- every `test-quic-*` test silently **skips** via `hasQuic`, so a green test run proves nothing.
+
+`build-node.sh` passes `--experimental-quic` by default (Ethan is on `@nodejs/quic`) and prints a `features:` line after a successful build so you can see what actually landed in the binary. Toggles: `QUIC=0` to omit it, `DTLS=1` to add `--experimental-dtls` (needed for `src/dtls` / `node:dtls` work, e.g. reviewing PRs that touch the shared `src/crypto` TLS/DTLS/QUIC code). Both flags still need their **runtime** flag too — `node --experimental-quic …`.
+
+### 💾 Disk hygiene — a build is ~25 GB, and every worktree gets its own
+
+**Check `df -h` before starting a build in a new worktree.** A Release build is **~25 GB** and each worktree has a separate `out/`, so three review worktrees will fill a disk. The out-of-space failure is misleading — the build dies deep in V8 with `libtool: error writing file 'libv8_base_without_compiler.a'` (that one archive is 4.7 GB) and says nothing about disk.
+
+**Release vs Debug — Release is the dev default, not a "production" build.** `./configure` targets it, `tools/test.py --mode=release` is how tests run, and CI's gating `node-test-pull-request` builds it. Debug is a *diagnostic* build: unoptimized, with `CHECK`/`DCHECK` and V8 debug assertions live. It is **bigger** than Release (~27 GB vs ~25 GB; binary 286 MB vs 134 MB) and makes test runs far slower, so it is never the cheaper daily driver.
+
+**Build Debug only when you actually need C++-level debugging** — chasing a crash or memory bug where debug assertions would fire, or stepping in a debugger — and **delete it when done**:
+```bash
+CC="ccache cc" CXX="ccache c++" ./configure --ninja --experimental-quic --debug
+ninja -C out/Debug node
+# ... debug ...
+rm -rf out/Debug
+```
+
+Rules:
+- **Remove a review worktree as soon as its review is done** — `git worktree remove --force <path>` then `git branch -D <branch>`. Re-fetching a PR ref later is cheap; 25 GB is not. Keep only worktrees with active work.
+- **`out/Release/obj.target` is stale make-generator output and is safe to delete** (~11 GB). Ninja builds into `out/Release/obj/`; nothing in the ninja graph produces or consumes `obj.target`. Its only textual mention is a `-DMODULESDIR=` string constant in `openssl.ninja` pointing at a path that doesn't even exist. It is **not** recreated by a `--ninja` build — only by a `./configure` without `--ninja`. Confirm first: `find out/Release/obj.target -type f -newermt "<recent date>" | wc -l` should be `0` while the same check on `out/Release/obj` is large.
+- **Don't trim ccache** (~9 GB, 25 GB cap). It lives outside `out/` (`~/Library/Caches/ccache` on macOS) and is exactly what makes deleting an `out/` cheap — rebuilds come back at ~45-65% cache hits instead of recompiling.
+
+### 🧠 Memory — cap the job count or the machine swaps
+
+Ninja defaults to `ncpu + 2`. A V8 translation unit peaks at roughly **0.5-2 GB**, so on a 16-18 GB machine that default drives the box deep into swap and makes everything else unusable — the build gets *slower*, because paging isn't compiling.
+
+`build-node.sh` therefore computes a RAM-aware job count — `min(ncpu, RAM_GB / 3)` — and prints what it chose:
+```
+-j6 (ncpu=12, ram=18G, ninja default would be 14)
+```
+Measured on a 12-core / 18 GB machine, same build: `-j14` → 28 compilers, 4.9 GB RSS, 37% free, swap nearly exhausted. `-j6` → 12 compilers, 2.9 GB RSS, 45% free. Roughly half the memory, and no slower in wall-clock because it stops thrashing.
+
+Overrides: `JOBS=N` for an explicit count; `NICE=1` additionally wraps ninja in `taskpolicy -b` (macOS background QoS — throttles CPU *and* I/O, maximum interactivity, noticeably slower build).
 
 **`--node-builtin-modules-path` makes the binary load `lib/*.js` from disk.** So after one build:
 - **Editing an existing `lib/*.js`** → no rebuild; just run `out/Release/node`.
@@ -99,7 +145,7 @@ Run it in the **background**, stream output directly (never pipe through `tail` 
 
 `/Users/ethan/.claude/skills/nodejs-contribute/scripts/`:
 - `lib.sh` — shared config (`REPO`/`ME`/`MY_TEAMS`) + `gh_retry` (GitHub secondary-rate-limit backoff).
-- `build-node.sh` — ccache reconfigure + `ninja` (run from repo root; background it).
+- `build-node.sh` — ccache reconfigure + `ninja` (run from repo root; background it). Env toggles: `QUIC=0` (default on), `DTLS=1`, `JOBS=N` (default `min(ncpu, RAM_GB/3)`), `NICE=1` (macOS background QoS). Prints the resolved configure args, the chosen `-j`, and a `features:` line on success.
 - `ci-status.sh <pr>` — authoritative CI via `ncu-ci`, verified against current head.
 - `repro.sh <pr> <test-path> [runs]` — main-vs-PR-head failure/fix demonstration; auto-builds native addons for node-api/addons tests; returns to `main` and cleans up.
 

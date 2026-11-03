@@ -2,13 +2,23 @@
 
 Personal [Claude Code](https://claude.com/claude-code) skills by [@Ethan-Arrowood](https://github.com/Ethan-Arrowood).
 
-Each top-level directory is a self-contained skill (a `SKILL.md` with YAML frontmatter, plus any supporting files). Drop one into `~/.claude/skills/` — or symlink it — and Claude Code will pick it up.
+Each top-level directory except [`rules/`](#rules) is a self-contained skill (a `SKILL.md` with YAML frontmatter, plus any supporting files). Drop one into `~/.claude/skills/` — or symlink it — and Claude Code will pick it up.
 
 ## Skills
 
 | Skill | What it does |
 |-------|--------------|
 | [`nodejs-review-queue`](nodejs-review-queue/) | Surfaces and triages open [`nodejs/node`](https://github.com/nodejs/node) PRs relevant to your subsystem teams, one at a time. Built around how Node.js actually routes reviews (team @-mentions from `nodejs-github-bot`, not individual assignment). **Read-only** — it helps you review; it never posts to GitHub. Includes checkout-and-build workflow, CI-flake vs. stale diagnosis, landing/label policy, and stalled-PR triage. |
+
+## Rules
+
+[`rules/`](rules/) holds rule files: instructions loaded into every Claude Code session, not invoked like a skill. Link them into `~/.claude/rules/`:
+
+```bash
+ln -s "$(pwd)/rules/general.md" ~/.claude/rules/general.md
+```
+
+My [dotfiles](https://github.com/Ethan-Arrowood/dotfiles) do this with a `rules Ethan-Arrowood/skills` line in a Skillfile.
 
 ## Install
 

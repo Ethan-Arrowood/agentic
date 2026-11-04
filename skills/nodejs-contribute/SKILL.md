@@ -36,7 +36,7 @@ For **reviewing/triaging other people's** PRs (read-only), use the `nodejs-revie
 - **Don't chase the tip when rebasing.** nodejs/node lands ~1 commit per 30 min, so any base is hours-old immediately; that is fine. Jenkins `node-test-pull-request` rebases onto current `origin/main` itself (`REBASE_ONTO`) before building. Rebase when the PR is genuinely `CONFLICTING`/far behind, not to match `upstream/main` exactly. Verify with `git merge-tree --write-tree upstream/main HEAD` rather than by comparing SHAs.
 - **Commit trailers (DCO) — NOT `Co-Authored-By`.** Every commit ends with:
   ```
-  Assisted-by: Claude <model>
+  Assisted-by: <model>
   Signed-off-by: Ethan Arrowood <ethan@arrowood.dev>
   ```
   (`<model>` = human-readable, e.g. "Claude Opus 4.8".) nodejs requires the DCO `Signed-off-by` and uses `Assisted-by` for AI assistance. This overrides the global `Co-Authored-By` default.

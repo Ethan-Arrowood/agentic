@@ -4,6 +4,8 @@ These practices apply to any agent. Tool-specific values are in [Per-tool settin
 
 ## Working directory
 
+Repos are cloned to `~/dev/<org>/<repo>`, where `<org>` is the GitHub owner. Look there first for a related repo.
+
 Operate within the relative working directory. Keep worktrees, temporary files, and other scratch state in the tool's own directory under it, written here as `<agent-dir>`:
 
 - Worktrees: `<agent-dir>/worktrees/<name>`
@@ -56,7 +58,7 @@ Org rules may replace this with a project convention, such as a DCO sign-off.
 - `<agent-dir>` is `.claude`. Claude Code's built-in worktree feature uses `.claude/worktrees/` too, so worktrees you create with `git worktree add` and worktrees Claude Code creates end up in the same folder.
 - Commit trailer, with `<model>` such as "Claude Opus N.N":
   ```text
-  Co-Authored-By: Claude <model> <noreply@anthropic.com>
+  Co-Authored-By: <model> <noreply@anthropic.com>
   ```
 
 ### Codex

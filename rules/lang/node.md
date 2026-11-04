@@ -8,6 +8,8 @@ paths:
 
 # Node.js
 
+Applies when running or working on JavaScript or TypeScript code, or anything with a `package.json`.
+
 ## Runtime version with fnm
 
 Use [fnm](https://github.com/Schniz/fnm) for every `node`/`npm`/`npx` invocation. Don't rely on whatever `node` is on `PATH`. Agent shells may not have fnm's shell hook loaded.

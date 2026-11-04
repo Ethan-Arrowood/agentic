@@ -76,7 +76,7 @@ Add a footer to anything you were involved in (outlining, proofreading, drafting
 
 The text depends on who wrote the message. Two links appear in it:
 
-- My setup: `https://github.com/Ethan-Arrowood/skills` (the tools, rules, and workflow behind the message).
+- My setup: `https://github.com/Ethan-Arrowood/agentic` (the tools, rules, and workflow behind the message).
 - Human Voice: `https://ai-policy.dev/policies/human-voice/1.0.0`.
 
 Footer text:
@@ -86,9 +86,9 @@ Footer text:
 
 Put it at the end on its own line, in the platform's markup, with "my setup" and "Human Voice" as links:
 
-- Renders HTML (GitHub): `<sub>…</sub>`, for example `<sub>AI-assisted (<model>, [my setup](https://github.com/Ethan-Arrowood/skills)). The words are my own, per the [Human Voice](https://ai-policy.dev/policies/human-voice/1.0.0) policy.</sub>`
+- Renders HTML (GitHub): `<sub>…</sub>`, for example `<sub>AI-assisted (<model>, [my setup](https://github.com/Ethan-Arrowood/agentic)). The words are my own, per the [Human Voice](https://ai-policy.dev/policies/human-voice/1.0.0) policy.</sub>`
 - Markdown without HTML: italics, `_…_`.
-- Slack: italics, `_…_`, with Slack's link syntax, such as `<https://github.com/Ethan-Arrowood/skills|my setup>`.
+- Slack: italics, `_…_`, with Slack's link syntax, such as `<https://github.com/Ethan-Arrowood/agentic|my setup>`.
 - Plain text (email and similar): a `---` line, then the footer with each bare URL in parentheses after its link text.
 
 Other cases:

@@ -25,7 +25,7 @@ If the repo has a Markdown linter or formatter config (`.markdownlint*`, `.remar
 ## Links
 
 - Files in the same repo: relative links (`[git.md](rules/git.md)`).
-- Sections: link with the heading's auto-generated anchor, such as `[Links](#links)` in the same file, `[Hooks](README.md#hooks)` in another. The anchor is the heading text lowercased, with spaces turned into `-` and punctuation other than `-` and `_` dropped. Don't invent another reference scheme (`§3.2`, `{#id}`, `[[name]]`, `^ref`, "see above"). Only use HTML `<a id>` tags when no heading fits (such as when two section headers have the same text and we need to differentiate).
+- Sections: link with the heading's auto-generated anchor, such as `[Links](#links)` in the same file, `[Agents](README.md#agents)` in another. The anchor is the heading text lowercased, with spaces turned into `-` and punctuation other than `-` and `_` dropped. Don't invent another reference scheme (`§3.2`, `{#id}`, `[[name]]`, `^ref`, "see above"). Only use HTML `<a id>` tags when no heading fits (such as when two section headers have the same text and we need to differentiate).
 - After renaming a heading, fix links to its anchor.
 - Issues and PRs: full URLs, never a bare `#123`. It resolves against whatever repo renders it, which is often a fork.
 - After moving or renaming a file, fix links that point to it.

@@ -32,6 +32,7 @@ Both Node.js skills are tuned to my setup: they hardcode my GitHub login, nodejs
 | [`git.md`](rules/git.md) | Repo layout, scratch-file locations, session-start checks, worktree-first workflow, default commit trailer. | Every session |
 | [`posting.md`](rules/posting.md) | Never post without explicit permission. Human Voice by default (outline, I write, agent proofreads), with exceptions set by narrower rules. First person and a footer per platform. | Every session |
 | [`writing.md`](rules/writing.md) | Prose style for anything written: project style guide first, then brevity, no filler, short sentences, no em dashes, sparing semicolons, correctness. | Every session |
+| [`agent-files.md`](rules/agent-files.md) | Prefer `AGENTS.md` over agent-specific instruction files, and keep agent setup tool-agnostic. | Agent config work |
 | [`markdown.md`](rules/markdown.md) | Markdown style defaults, links, and what not to add. Defers to a repo's lint config. | Markdown files |
 | [`lang/node.md`](rules/lang/node.md) | Node.js version resolution and use via fnm. | JS/TS code and `package.json` projects |
 | [`orgs/nodejs.md`](rules/orgs/nodejs.md) | `nodejs` org: DCO trailers (built from the per-tool trailer in `git.md`), built binary vs fnm, defer to each repo's docs. | Repos under `~/dev/nodejs/` |
@@ -69,7 +70,7 @@ Every always-loaded rule costs context in every session, and longer instruction 
 
 | Agent | Rules go to | Skills go to | Org rules |
 |-------|-------------|--------------|-----------|
-| [Claude Code](agents/claude/) | Symlinks in `~/.claude/rules/` | Symlinks in `~/.claude/skills/` | `~/dev/<org>/CLAUDE.md` imports, loaded only under that org |
+| [Claude Code](agents/claude/) | Symlinks in `~/.claude/rules/` | Symlinks in `~/.claude/skills/` | `~/dev/<org>/AGENTS.md` symlinks, loaded only under that org |
 | [Codex](agents/codex/) | One generated `~/.codex/AGENTS.md` | Symlinks in `~/.agents/skills/` | Included in the generated file, loaded everywhere |
 
 Every hook fast-forwards this clone (`git pull --ff-only`), only installs into directories that already exist, never overwrites anything it didn't create, stays silent on a no-op, and always exits 0. A rule pulled at session start loads in the next session, so updates reach a machine one session late. The hooks only pull; push from the machine where you edit.

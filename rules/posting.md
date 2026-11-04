@@ -62,7 +62,7 @@ For code, the policy means: before I open a PR, make sure I've reviewed the diff
 
 ## Exceptions
 
-For some work you may write the text yourself, such as Harper repos or specific personal projects. That has to come from a more specific rule (an org rule or a repo's `CLAUDE.md`) or from me for the current task. Without one, Human Voice applies. [Permission](#permission) still applies unless that rule explicitly says otherwise.
+For some work you may write the text yourself, such as Harper repos or specific personal projects. That has to come from a more specific rule (an org rule or a repo's `AGENTS.md` or other agent instruction file) or from me for the current task. Without one, Human Voice applies. [Permission](#permission) still applies unless that rule explicitly says otherwise.
 
 ## Voice
 

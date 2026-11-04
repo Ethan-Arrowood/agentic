@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Claude Code SessionStart hook: fast-forward this repo, link rules and skills
-# into ~/.claude, and create missing ~/dev/<org>/CLAUDE.md imports for org rules.
+# into ~/.claude, and link org rules as ~/dev/<org>/AGENTS.md.
 # See agents/claude/README.md.
 
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
@@ -20,18 +20,25 @@ fi
 
 link_skills "$claude_dir/skills"
 
-# Org rules load through ~/dev/<org>/CLAUDE.md, which Claude Code reads for any
-# session under that directory. Create it only where the org directory exists
-# and has no CLAUDE.md yet. Never overwrite.
+# Org rules: ~/dev/<org>/AGENTS.md symlinks, which Claude Code reads for any
+# session under that directory. Migrate the CLAUDE.md imports older versions of
+# this hook wrote, then link.
 for f in "$repo"/rules/orgs/*.md; do
   [ -e "$f" ] || continue
-  org="$(basename "$f" .md)"
-  [ -d "$dev_dir/$org" ] || continue
-  dest="$dev_dir/$org/CLAUDE.md"
-  if [ ! -e "$dest" ] && [ ! -L "$dest" ]; then
-    echo "@$f" > "$dest" &&
-      note "Created $dest importing $f. To keep repos' own AGENTS.md loading under it, set Project instructions to claude-md-and-agents-md."
+  old="$dev_dir/$(basename "$f" .md)/CLAUDE.md"
+  if [ -f "$old" ] && [ ! -L "$old" ] && [ "$(cat "$old")" = "@$f" ]; then
+    rm "$old" && note "Removed $old (replaced by AGENTS.md)."
   fi
 done
+link_org_agents_md
+
+# Without claude-md-and-agents-md, any CLAUDE.md in or above a repo makes
+# Claude Code skip every AGENTS.md, including the org rules.
+settings="$claude_dir/settings.json"
+if command -v jq >/dev/null 2>&1 && [ -f "$settings" ]; then
+  mode="$(jq -r '.pluginConfigs["cc-plugin-agents-md@builtin"].options.instructionFiles // empty' "$settings" 2>/dev/null)"
+  [ "$mode" = "claude-md-and-agents-md" ] ||
+    note "Project instructions isn't claude-md-and-agents-md in $settings, so repos with a CLAUDE.md skip AGENTS.md files, including org rules. See agents/claude/README.md."
+fi
 
 finish claude

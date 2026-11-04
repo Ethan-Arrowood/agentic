@@ -84,6 +84,24 @@ link_skills() {
   done
 }
 
+# Symlink each rules/orgs/<org>.md as ~/dev/<org>/AGENTS.md, where the org
+# directory exists and the name is free. Never overwrite.
+link_org_agents_md() {
+  local f dir dest
+  for f in "$repo"/rules/orgs/*.md; do
+    [ -e "$f" ] || continue
+    dir="$dev_dir/$(basename "$f" .md)"
+    [ -d "$dir" ] || continue
+    dest="$dir/AGENTS.md"
+    if [ -L "$dest" ] && [ ! -e "$dest" ]; then
+      case "$(readlink "$dest")" in "$repo"/*) rm "$dest" ;; esac
+    fi
+    if [ ! -e "$dest" ] && [ ! -L "$dest" ]; then
+      ln -s "$f" "$dest" && note "Linked $dest"
+    fi
+  done
+}
+
 # Print a rule file without its YAML frontmatter.
 strip_frontmatter() {
   awk 'NR == 1 && $0 == "---" { fm = 1; next } fm && $0 == "---" { fm = 0; next } !fm' "$1"

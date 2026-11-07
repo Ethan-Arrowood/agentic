@@ -64,4 +64,26 @@ Finally, add the required setting to `~/.claude/settings.json` (see [How each ki
 }
 ```
 
+## Cloud sessions
+
+Claude Code cloud sessions (claude.ai/code) start each session in a fresh container, so the install runs from the cloud environment's setup script instead of a hook. Add this as the environment's setup script (cloud environment menu, then Edit):
+
+```bash
+# Load Ethan's agentic rules and skills (github.com/Ethan-Arrowood/agentic).
+d=/root/dev/ethan-arrowood/agentic
+if [ ! -d "$d/.git" ]; then
+  git clone -q --depth 1 https://github.com/Ethan-Arrowood/agentic "$d" || echo "agentic: clone failed"
+fi
+# Load AGENTS.md files even in repos that also have a CLAUDE.md.
+s=/root/.claude/settings.json
+mkdir -p /root/.claude/rules /root/.claude/skills
+[ -s "$s" ] || echo '{}' > "$s"
+jq '.pluginConfigs["cc-plugin-agents-md@builtin"].options.instructionFiles = "claude-md-and-agents-md"' "$s" > "$s.tmp" && mv "$s.tmp" "$s"
+if [ -x "$d/agents/claude/sync.sh" ]; then
+  "$d/agents/claude/sync.sh"
+fi
+```
+
+Each container clones the latest `main`, so rule changes reach the next cloud session without a pull. A failed clone prints a note and the session starts without the rules. Repos are cloned to `/home/user/<repo>`, not `~/dev/<org>/<repo>`, so org rules don't load. *Cloud sessions* in [`git.md`](../../rules/git.md#cloud-sessions) covers how the rules change there.
+
 To keep an independent snapshot of a skill instead of a link, copy it: `cp -R skills/nodejs-contribute ~/.claude/skills/`.

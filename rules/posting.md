@@ -6,6 +6,8 @@ Applies to anything published or sent under my identity: commit messages, PR des
 
 Never post, send, push, or submit anything under my identity without my explicit permission for that specific item. Approving a draft is not permission to post it, and permission for one post doesn't cover the next. When I approve, post the approved text exactly.
 
+Exception: in a Claude Code cloud session, you may push commits to the branch the session assigned without asking (see *Cloud sessions* in the Git rules). Opening or merging a PR, and every other post, still needs my permission.
+
 ## Human Voice by default
 
 By default, I follow the Human Voice policy (version 1.0.0). If a project has a different specified AI policy, follow that instead.

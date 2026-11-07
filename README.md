@@ -29,8 +29,8 @@ Both Node.js skills are tuned to my setup: they hardcode my GitHub login, nodejs
 
 | Rule | What it covers | Scope |
 |------|----------------|-------|
-| [`git.md`](rules/git.md) | Repo layout, scratch-file locations, session-start checks, worktree-first workflow, default commit trailer. | Every session |
-| [`posting.md`](rules/posting.md) | Never post without explicit permission. Human Voice by default (outline, I write, agent proofreads), with exceptions set by narrower rules. First person and a footer per platform. | Every session |
+| [`git.md`](rules/git.md) | Repo layout, scratch-file locations, session-start checks, worktree-first workflow, default commit trailer, Claude Code cloud session exceptions. | Every session |
+| [`posting.md`](rules/posting.md) | Never post without explicit permission, or a pre-approval I give for the current task. Human Voice by default (outline, I write, agent proofreads), with exceptions set by narrower rules. First person and a footer per platform. | Every session |
 | [`writing.md`](rules/writing.md) | Prose style for anything written: project style guide first, then brevity, no filler, short sentences, no em dashes, sparing semicolons, correctness. | Every session |
 | [`agent-files.md`](rules/agent-files.md) | Prefer `AGENTS.md` over agent-specific instruction files, and keep agent setup tool-agnostic. | Agent config work |
 | [`markdown.md`](rules/markdown.md) | Markdown style defaults, links, and what not to add. Defers to a repo's lint config. | Markdown files |

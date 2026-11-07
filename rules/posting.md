@@ -6,6 +6,8 @@ Applies to anything published or sent under my identity: commit messages, PR des
 
 Never post, send, push, or submit anything under my identity without my explicit permission for that specific item. Approving a draft is not permission to post it, and permission for one post doesn't cover the next. When I approve, post the approved text exactly.
 
+You may ask me to pre-approve a set of posts for the current task, such as "push commits and open the PR without asking each time". List what it covers. Pre-approval covers only that task and only what I approved. Ask again for every new task.
+
 ## Human Voice by default
 
 By default, I follow the Human Voice policy (version 1.0.0). If a project has a different specified AI policy, follow that instead.

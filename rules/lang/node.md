@@ -14,7 +14,7 @@ Applies when running or working on JavaScript or TypeScript code, or anything wi
 
 Use [fnm](https://github.com/Schniz/fnm) for every `node`/`npm`/`npx` invocation. Don't rely on whatever `node` is on `PATH`. Agent shells may not have fnm's shell hook loaded.
 
-If fnm isn't installed, as in Claude Code cloud sessions, say so. Use the `node` on `PATH` if it matches the version resolved below. Otherwise ask before installing anything.
+If fnm isn't installed, as in Claude Code cloud sessions, first check if `node` is on the system `PATH` and if it matches the necessary version. If it matches, continue working on the task. If it doesn't, first consider if the given task can be completed without updating the Node.js version. If it can't, try to install `fnm` and update the Node.js version.
 
 Resolve the version once per session, in this order, from the project root:
 

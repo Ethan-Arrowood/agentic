@@ -68,7 +68,7 @@ A Claude Code cloud session (claude.ai/code, where `CLAUDE_CODE_REMOTE=true`) st
 - **Working directory:** repos are at `/home/user/<repo>`, not `~/dev/<org>/<repo>`. Org rules don't load.
 - **Session start:** do step 1 only. Work on the assigned branch. Don't check out or pull the default branch, and don't ask before working on the assigned branch.
 - **Worktrees:** don't create them. Work on the assigned branch in the existing clone.
-- **Pushing:** unpushed work is lost with the container, so push commits to the assigned branch before you finish. The [Posting](posting.md#permission) rules allow this without asking.
+- **Pushing:** unpushed work is lost with the container. Before you finish, ask to push to the assigned branch. The [Posting](posting.md#permission) rules apply as in any other session.
 
 ### Codex
 

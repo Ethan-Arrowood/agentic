@@ -5,7 +5,6 @@ metadata:
   author: Ethan Arrowood
   tags: nodejs, github, contributing, build, testing, git, pull-requests
   version: 1.0.0
-user-invocable: true
 allowed-tools:
   - Bash
   - Read
@@ -39,13 +38,13 @@ For **reviewing/triaging other people's** PRs (read-only), use the `nodejs-revie
   Assisted-by: <model>
   Signed-off-by: Ethan Arrowood <ethan@arrowood.dev>
   ```
-  (`<model>` = human-readable, e.g. "Claude Opus 4.8".) nodejs requires the DCO `Signed-off-by` and uses `Assisted-by` for AI assistance. This overrides the global `Co-Authored-By` default.
-- **`CLAUDE.md` is gitignored upstream** (`.gitignore` line ~165) — do not rely on a project `CLAUDE.md`; it won't travel across machines. This skill is the portable source of truth.
+  (`<model>` is the human-readable name of the model running, with the agent's usual attribution email if it has one.) nodejs requires the DCO `Signed-off-by` and uses `Assisted-by` for AI assistance. This overrides the global `Co-Authored-By` default.
+- **Don't keep workflow notes in an untracked agent instruction file in the clone.** It won't travel across machines. This skill is the portable source of truth.
 
 ## One-time setup (per machine)
 
 - **ccache** — the review/dev loop rebuilds C++ and switches branches constantly; ~2,000 of Node's ~3,300 targets are V8/deps identical across branches. Check `which ccache`; if missing (macOS): `brew install ccache`, add `export CC="ccache cc"` / `export CXX="ccache c++"` to `~/.zshrc`, and `ccache -M 25G` (V8 objects are large; the 5GB default thrashes). Linux: `apt install ccache mold` + `CC="ccache gcc"`/`CXX="ccache g++"`/`LDFLAGS="-fuse-ld=mold"`.
-  - ⚠️ **gyp bakes the compiler command into the ninja graph at `./configure` time** — `CC`/`CXX` must be set *before* configure, and Bash-tool shells may not source `~/.zshrc`, so **export them inline** on the configure command.
+  - ⚠️ **gyp bakes the compiler command into the ninja graph at `./configure` time** — `CC`/`CXX` must be set *before* configure, and agent shells may not source `~/.zshrc`, so **export them inline** on the configure command.
 - **`@node-core/utils`** (`ncu-ci` + `git-node`): `npm i -g @node-core/utils`; reads `~/.ncurc` for the GitHub token. Plus `gh` (authenticated).
 
 ## Building — `scripts/build-node.sh`
@@ -141,12 +140,13 @@ Overrides: `JOBS=N` for an explicit count; `NICE=1` additionally wraps ninja in 
 - **Experimental surface** (Stability 1) → behavior changes are fine as **patch**, no `semver-major` (e.g. experimental quic/zlib-Zstd/iterable-streams).
 - Add backport labels for changes to APIs already shipped in an LTS/current line.
 
-## Bundled tools (`scripts/`, invoke by absolute path from the skill base dir)
+## Bundled tools (`scripts/`)
 
-`/Users/ethan/.claude/skills/nodejs-contribute/scripts/`:
+Paths are relative to this skill's directory. The `nodejs-review-queue` skill uses these too.
+
 - `lib.sh` — shared config (`REPO`/`ME`/`MY_TEAMS`) + `gh_retry` (GitHub secondary-rate-limit backoff).
 - `build-node.sh` — ccache reconfigure + `ninja` (run from repo root; background it). Env toggles: `QUIC=0` (default on), `DTLS=1`, `JOBS=N` (default `min(ncpu, RAM_GB/3)`), `NICE=1` (macOS background QoS). Prints the resolved configure args, the chosen `-j`, and a `features:` line on success.
 - `ci-status.sh <pr>` — authoritative CI via `ncu-ci`, verified against current head.
 - `repro.sh <pr> <test-path> [runs]` — main-vs-PR-head failure/fix demonstration; auto-builds native addons for node-api/addons tests; returns to `main` and cleans up.
 
-Covered by a permission allow-rule (`Bash(/Users/ethan/.claude/skills/nodejs-contribute/scripts/*)`); run build/CI work through them so they don't re-prompt and work regardless of `~/.zshrc`.
+Run build and CI work through these scripts, one command each. They set the environment themselves, so they work regardless of `~/.zshrc`, and a single command is easier for an agent's permission rules to allow than an env-prefixed or piped one.

@@ -21,7 +21,7 @@ Each directory in [`skills/`](skills/) is a self-contained skill: a `SKILL.md` w
 | [`nodejs-contribute`](skills/nodejs-contribute/) | Build, test, commit, and land your own changes in a local [`nodejs/node`](https://github.com/nodejs/node) clone. ccache + RAM-aware `ninja` builds, configure-time feature gating (QUIC/DTLS), native-addon tests, DCO commit trailers, authoritative CI status via `ncu-ci`, and the landing/label policy. Ships the shared `build-node.sh`, `ci-status.sh`, and `repro.sh` tools. |
 | [`nodejs-review-queue`](skills/nodejs-review-queue/) | Surfaces and triages open `nodejs/node` PRs relevant to your subsystem teams, one at a time. Built around how Node.js actually routes reviews (team @-mentions from `nodejs-github-bot`, not individual assignment). Includes a re-review lane for PRs you already reviewed and a cleanup-sweep mode for stalled PRs. **Read-only:** it never posts to GitHub. **Requires `nodejs-contribute`** for its build/CI/repro tools. |
 
-Both Node.js skills are tuned to my setup: they hardcode my GitHub login, nodejs team memberships, clone location (`~/dev/nodejs/node`), and the Claude Code install path `~/.claude/skills/<name>/scripts/`. Adjust those before using them yourself.
+Both Node.js skills are tuned to my setup: they hardcode my GitHub login, nodejs team memberships, and clone location (`~/dev/nodejs/node`). Adjust those before using them yourself. They work in any agent that reads `SKILL.md` skills. Claude Code permission rules for them are in [`agents/claude/README.md`](agents/claude/README.md#permissions-for-the-nodejs-skills).
 
 ## Rules
 

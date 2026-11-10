@@ -86,4 +86,25 @@ fi
 
 Each container clones the latest `main`, so rule changes reach the next cloud session without a pull. A failed clone prints a note and the session starts without the rules. Repos are cloned to `/home/user/<repo>`, not `~/dev/<org>/<repo>`, so org rules don't load. *Cloud sessions* in [`git.md`](../../rules/git.md#cloud-sessions) covers how the rules change there.
 
+## Permissions for the Node.js skills
+
+A skill can't grant tool approval, so the `nodejs-contribute` and `nodejs-review-queue` scripts prompt on every run until you allow them. Add these once to `~/dev/nodejs/node/.claude/settings.local.json`, which is git-ignored. Merge with what's there; don't replace it.
+
+```json
+{ "permissions": { "allow": [
+  "Bash(~/.claude/skills/nodejs-review-queue/scripts/*)",
+  "Bash(~/.claude/skills/nodejs-contribute/scripts/*)",
+  "Bash(zsh ~/.claude/skills/*)", "Bash(./.claude/tmp/*)",
+  "Bash(ninja:*)", "Bash(ncu-ci:*)",
+  "Bash(git fetch:*)", "Bash(git checkout:*)", "Bash(git pull:*)", "Bash(git log:*)",
+  "Bash(git show:*)", "Bash(git rev-parse:*)", "Bash(git branch:*)", "Bash(git status:*)", "Bash(git diff:*)",
+  "Bash(gh pr view:*)", "Bash(gh pr checks:*)", "Bash(gh pr diff:*)", "Bash(gh pr list:*)", "Bash(gh run view:*)", "Bash(gh api:*)",
+  "Bash(python3:*)", "Bash(grep:*)", "Bash(awk:*)", "Bash(sort:*)", "Bash(uniq:*)", "Bash(jq:*)", "Bash(wc:*)", "Bash(comm:*)", "Bash(head:*)", "Bash(tail:*)"
+] } }
+```
+
+- Claude Code matches Bash rules against the command as typed. The script rules only match when Claude types the path as `~/.claude/skills/…`, not the expanded home directory. If a script still prompts, check how the command was written.
+- Commands prefixed with env vars (`CC="ccache cc" ./configure`) and pipelines need every part allowed, which is why the skills route that work through their scripts.
+- Deliberately not allowed, so they still prompt: `git commit`, `push`, `reset`, `rebase`, `gh pr review`, `gh pr comment`, `rm`, `mv`.
+
 To keep an independent snapshot of a skill instead of a link, copy it: `cp -R skills/nodejs-contribute ~/.claude/skills/`.

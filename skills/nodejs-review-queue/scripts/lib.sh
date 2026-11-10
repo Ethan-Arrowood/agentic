@@ -9,7 +9,8 @@ MY_TEAMS=(net http quic dgram fs streams undici web-server-frameworks web-standa
 # secondary rate limit. Backs off 1..5 min and retries the SAME call.
 # Usage: gh_retry gh api ...
 gh_retry() {
-  local a=0 err out="/tmp/ghr.$$"
+  local a=0 err out
+  out=$(mktemp "${TMPDIR:-/tmp}/ghr.XXXXXX") || return 1
   while :; do
     err=$("$@" 2>&1 >"$out") && { cat "$out"; rm -f "$out"; return 0; }
     if printf '%s' "$err" | grep -qi 'secondary rate limit' && [ $a -lt 5 ]; then
@@ -17,4 +18,13 @@ gh_retry() {
     fi
     printf '%s\n' "$err" >&2; rm -f "$out"; return 1
   done
+}
+
+# All open, non-draft PR numbers (not authored by $ME) matching a search
+# qualifier string. Paginates past the search API's default 30 results.
+# Usage: search_prs 'in:comments "@nodejs/net"'
+search_prs() {
+  gh_retry gh api -X GET search/issues --paginate \
+    -f q="repo:$REPO is:pr is:open draft:false -author:$ME $1" \
+    -f per_page=100 --jq '.items[].number'
 }

@@ -1,7 +1,7 @@
 # nodejs-contribute tools
 
-General nodejs/node build/test/CI helpers. Invoke by absolute path from the skill
-base dir (`/Users/ethan/.claude/skills/nodejs-contribute/scripts/…`). Config via
+General nodejs/node build/test/CI helpers. Invoke by path from the skill
+directory, written with `~` (`~/.claude/skills/nodejs-contribute/scripts/…`). Config via
 env: `REPO` (default `nodejs/node`), `ME` (default `gh api user`).
 
 | Tool | Purpose | Notes |

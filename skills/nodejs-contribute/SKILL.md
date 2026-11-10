@@ -141,12 +141,12 @@ Overrides: `JOBS=N` for an explicit count; `NICE=1` additionally wraps ninja in 
 - **Experimental surface** (Stability 1) → behavior changes are fine as **patch**, no `semver-major` (e.g. experimental quic/zlib-Zstd/iterable-streams).
 - Add backport labels for changes to APIs already shipped in an LTS/current line.
 
-## Bundled tools (`scripts/`, invoke by absolute path from the skill base dir)
+## Bundled tools (`scripts/`, invoke by path from the skill directory, written with `~`)
 
-`/Users/ethan/.claude/skills/nodejs-contribute/scripts/`:
+`~/.claude/skills/nodejs-contribute/scripts/`:
 - `lib.sh` — shared config (`REPO`/`ME`/`MY_TEAMS`) + `gh_retry` (GitHub secondary-rate-limit backoff).
 - `build-node.sh` — ccache reconfigure + `ninja` (run from repo root; background it). Env toggles: `QUIC=0` (default on), `DTLS=1`, `JOBS=N` (default `min(ncpu, RAM_GB/3)`), `NICE=1` (macOS background QoS). Prints the resolved configure args, the chosen `-j`, and a `features:` line on success.
 - `ci-status.sh <pr>` — authoritative CI via `ncu-ci`, verified against current head.
 - `repro.sh <pr> <test-path> [runs]` — main-vs-PR-head failure/fix demonstration; auto-builds native addons for node-api/addons tests; returns to `main` and cleans up.
 
-Covered by a permission allow-rule (`Bash(/Users/ethan/.claude/skills/nodejs-contribute/scripts/*)`); run build/CI work through them so they don't re-prompt and work regardless of `~/.zshrc`.
+Covered by a permission allow-rule (`Bash(~/.claude/skills/nodejs-contribute/scripts/*)`); invoke them as `~/.claude/skills/…` (the rule matches the command text, not an expanded home path) and run build/CI work through them so they don't re-prompt and work regardless of `~/.zshrc`.

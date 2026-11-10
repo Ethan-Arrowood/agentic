@@ -5,7 +5,6 @@ metadata:
   author: Ethan Arrowood
   tags: nodejs, github, code-review, pull-requests, networking, workflow
   version: 2.0.0
-user-invocable: true
 allowed-tools:
   - Bash
   - Read
@@ -75,7 +74,7 @@ The local clone is `~/dev/nodejs/node`. Environment setup, ccache, and building 
 1. Run `git status`. If the tree is dirty, stop and ask whether to stash, commit, or keep going.
 2. If on a branch other than `main`, say so and ask before switching.
 3. Otherwise update `main`: `git fetch upstream main && git checkout main && git pull --ff-only upstream main`.
-4. If the pull brought commits, or the tree was never built, start `nodejs-contribute`'s `build-node.sh` in the background before building the queue, so the binary is ready when the user picks a PR to try.
+4. If the pull brought commits, or the tree was never built, start the `nodejs-contribute` skill's `scripts/build-node.sh` in the background before building the queue, so the binary is ready when the user picks a PR to try.
 
 ## GitHub rate limits
 
@@ -90,21 +89,21 @@ If a session's first burst already tripped the limit, run the loop in the backgr
 
 ## Procedure
 
-Prefer the bundled tools over ad-hoc commands. Invoke them from each skill's `scripts/` directory (see [Per-tool settings](#per-tool-settings)).
+Prefer the bundled tools over ad-hoc commands. Paths below are relative to the skill that owns the tool. This skill's tools are in its own `scripts/` directory. The others come from the `nodejs-contribute` skill, which must be installed alongside this one.
 
-| Step | Tool | Lives in |
+| Step | Tool | Skill |
 |------|------|----------|
-| 1: team-mention queue | `build-queue.sh` (background it) | `nodejs-review-queue/scripts/` |
-| 1b: re-review lane | `rereview.py [--all]` | `nodejs-review-queue/scripts/` |
-| 2: CI status | `ci-status.sh <pr>` | `nodejs-contribute/scripts/` |
-| 2: local build | `build-node.sh` (background it) | `nodejs-contribute/scripts/` |
-| 2: crash or fix repro | `repro.sh <pr> <test-path> [runs]` | `nodejs-contribute/scripts/` |
+| 1: team-mention queue | `scripts/build-queue.sh` (background it) | this one |
+| 1b: re-review lane | `scripts/rereview.py [--all]` | this one |
+| 2: CI status | `scripts/ci-status.sh <pr>` | `nodejs-contribute` |
+| 2: local build | `scripts/build-node.sh` (background it) | `nodejs-contribute` |
+| 2: crash or fix repro | `scripts/repro.sh <pr> <test-path> [runs]` | `nodejs-contribute` |
 
 `nodejs-contribute` is the source of truth for building, testing (including node-api addons), CI mechanics (`request-ci`, `ncu-ci`), and landing (`commit-queue`, squash vs. rebase, "closed = landed"). Reference it rather than restating it.
 
 ### 1. Build the queue
 
-Run `build-queue.sh` in the background. It searches each team's mentions in open, non-draft PRs not authored by the user, then reads each candidate's bot comment and keeps only PRs whose checkbox list includes one of the user's teams. Each output line is `<number>\t<unchecked teams>\t<checked teams>`. Mentions by humans, with no matching bot checkbox, are dropped.
+Run `scripts/build-queue.sh` in the background. It searches each team's mentions in open, non-draft PRs not authored by the user, then reads each candidate's bot comment and keeps only PRs whose checkbox list includes one of the user's teams. Each output line is `<number>\t<unchecked teams>\t<checked teams>`. Mentions by humans, with no matching bot checkbox, are dropped.
 
 If it exits 1 with `INCOMPLETE:`, the queue is partial. Say which calls failed and offer to rerun.
 
@@ -116,11 +115,11 @@ High-volume teams such as `net` make a large union. Say how many PRs were found 
 
 Run this every session alongside step 1. Don't build the queue by subtracting PRs the user already reviewed. A reviewed PR that changed since the review is often the highest-priority item: an author's fix to a changes-requested PR, or a PR that became land-ready.
 
-`rereview.py` finds open PRs the user reviewed (`reviewed-by:`, which finds the user's own past reviews and isn't the prohibited assignment search). It compares the commit of the user's latest decisive review to the current head. It also catches PRs that dropped out of the step 1 search, so run both.
+`scripts/rereview.py` finds open PRs the user reviewed (`reviewed-by:`, which finds the user's own past reviews and isn't the prohibited assignment search). It compares the commit of the user's latest decisive review to the current head. It also catches PRs that dropped out of the step 1 search, so run both.
 
 - 🔴 **RE-REVIEW-ASAP**: user requested changes and the head advanced, so the author pushed a fix. Surface these first, newest push first.
 - 🟠 **RE-REVIEW**: user approved but the head advanced. The approval doesn't cover the new commits and may be stale.
-- ✅ **CQ-CANDIDATE**: user approved the current head, approvals meet the bar (2, or 1 if open over 7 days), mergeable, no `commit-queue` label. Confirm CI is green on the current head with `ci-status.sh <pr>`, then recommend adding `commit-queue`. Approvals alone aren't enough.
+- ✅ **CQ-CANDIDATE**: user approved the current head, approvals meet the bar (2, or 1 if open over 7 days), mergeable, no `commit-queue` label. Confirm CI is green on the current head with `nodejs-contribute`'s `scripts/ci-status.sh <pr>`, then recommend adding `commit-queue`. Approvals alone aren't enough.
 - ⏸ **UNADDRESSED**: user requested changes and the head hasn't moved. Waiting on the author.
 - · **CURRENT**: everything else. Collapsed unless `--all`.
 
@@ -136,7 +135,7 @@ gh pr view <n> --repo nodejs/node \
 gh pr diff <n> --repo nodejs/node
 ```
 
-**CI status:** never conclude it from `gh pr checks`. GitHub's check list mixes stale nodes with the current Jenkins run and has caused a wrong "CI failing" call. Use `ci-status.sh <pr>`, which runs `ncu-ci` against the current head.
+**CI status:** never conclude it from `gh pr checks`. GitHub's check list mixes stale nodes with the current Jenkins run and has caused a wrong "CI failing" call. Use `nodejs-contribute`'s `scripts/ci-status.sh <pr>`, which runs `ncu-ci` against the current head.
 
 **Read the existing discussion first.** Node.js PRs are heavily commented, and collaborators, the author, and bots have often raised and resolved what you'd flag. Watch for CI bot comments, `@nodejs/tsc` or collaborator objections, semver-major concerns, and blocking change requests. Pull all three streams:
 
@@ -157,7 +156,7 @@ Surface process state with the code:
 
 **Read the PR's code, not just the diff or stale local `main`.** Run `git fetch upstream pull/<n>/head:pr-<n>`, then `git show pr-<n>:<path>`. This doesn't touch the working tree and gives PR-accurate line numbers. Delete the `pr-<n>` ref when done.
 
-**For complex PRs (new APIs or events, tricky lifecycle), build and demonstrate claimed failure modes** such as crashes, wire corruption, or double emits. Don't only trace them. Use `nodejs-contribute`'s `repro.sh <pr> <test-path> [runs]`, which builds `main` and the PR head and runs each N times, or `build-node.sh` plus a manual scenario. Report the observed output, including a repro that did not reproduce (that kills the finding).
+**For complex PRs (new APIs or events, tricky lifecycle), build and demonstrate claimed failure modes** such as crashes, wire corruption, or double emits. Don't only trace them. Use `nodejs-contribute`'s `scripts/repro.sh <pr> <test-path> [runs]`, which builds `main` and the PR head and runs each N times, or `build-node.sh` plus a manual scenario. Report the observed output, including a repro that did not reproduce (that kills the finding).
 
 Give a structured summary in chat:
 
@@ -231,7 +230,7 @@ A wider net for backlog cleanup: find open networking PRs that are abandoned or 
 Union open, non-draft PRs not authored by the user across the networking labels: `net http https http2 quic dgram tls dns stream`. `gh pr list --label` ANDs repeated labels, so loop per label and dedupe. Keep it serial and spaced:
 
 ```bash
-source <skill-dir>/scripts/lib.sh
+source <this-skill-dir>/scripts/lib.sh
 LIST=$(mktemp)
 for L in net http https http2 quic dgram tls dns stream; do
   gh_retry gh pr list --repo "$REPO" --state open --label "$L" --limit 1000 \
@@ -269,7 +268,7 @@ Present two tables: 🧹 clean `stalled` targets (oldest first) and 🤝 collabo
 
 ### C4. State ledger across sessions
 
-A sweep spans many sessions, so don't re-surface PRs the user already handled. Keep a JSON ledger outside the skill directory (see [Per-tool settings](#per-tool-settings) for its path):
+A sweep spans many sessions, so don't re-surface PRs the user already handled. Keep a JSON ledger outside the skill directory, at `${XDG_STATE_HOME:-$HOME/.local/state}/nodejs-review-queue/state.json`:
 
 ```json
 { "swept": { "63965": { "disposition": "stalled|pinged|kept|reviewed", "headSha": "<sha>", "at": "<iso>" } } }
@@ -284,32 +283,3 @@ Badges show priority regardless of position: `🔴 PATCH`, `🔁 REVIVED (+N)`, 
 ### C6. Report scale
 
 The full networking set is 100+ PRs. Say how many were found and how many you triaged this pass, and offer to continue in batches (for example the oldest 30 at a time). Log what was deferred.
-
-## Per-tool settings
-
-### Claude Code
-
-- **Skill directory:** `~/.claude/skills/nodejs-review-queue/` (a symlink into the agentic repo).
-- **Ledger:** `~/.claude/nodejs-review-queue/state.json`.
-- **`allowed-tools`** in the frontmatter is a Claude Code field. Other agents ignore it.
-- **Permission allow-rules.** A skill can't grant tool approval. Add these once to `~/dev/nodejs/node/.claude/settings.local.json` (git-ignored). Merge with what's there; don't replace it.
-  ```json
-  { "permissions": { "allow": [
-    "Bash(~/.claude/skills/nodejs-review-queue/scripts/*)",
-    "Bash(~/.claude/skills/nodejs-contribute/scripts/*)",
-    "Bash(zsh ~/.claude/skills/*)", "Bash(./.claude/tmp/*)",
-    "Bash(ninja:*)", "Bash(ncu-ci:*)",
-    "Bash(git fetch:*)", "Bash(git checkout:*)", "Bash(git pull:*)", "Bash(git log:*)",
-    "Bash(git show:*)", "Bash(git rev-parse:*)", "Bash(git branch:*)", "Bash(git status:*)", "Bash(git diff:*)",
-    "Bash(gh pr view:*)", "Bash(gh pr checks:*)", "Bash(gh pr diff:*)", "Bash(gh pr list:*)", "Bash(gh run view:*)", "Bash(gh api:*)",
-    "Bash(python3:*)", "Bash(grep:*)", "Bash(awk:*)", "Bash(sort:*)", "Bash(uniq:*)", "Bash(jq:*)", "Bash(wc:*)", "Bash(comm:*)", "Bash(head:*)", "Bash(tail:*)"
-  ] } }
-  ```
-  - Claude Code matches Bash rules against the command as typed, so type script paths as `~/.claude/skills/…`, not an expanded home path.
-  - Run build and queue work through the skills' `scripts/`, one command each. That avoids two matcher limits: env-var-prefixed commands (`CC="ccache cc" ./configure`) and pipelines, which need every sub-command allowed.
-  - Deliberately not allowed, so they still prompt: `git commit`, `push`, `reset`, `rebase`, `gh pr review`, `gh pr comment`, `rm`, `mv`.
-
-### Codex
-
-- **Skill directory:** `~/.agents/skills/nodejs-review-queue/`.
-- **Ledger:** `~/.codex/nodejs-review-queue/state.json`.

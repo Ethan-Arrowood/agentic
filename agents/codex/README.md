@@ -51,5 +51,3 @@ The first run generates `~/.codex/AGENTS.md` and links the skills. Then register
 ```
 
 Codex runs a hook only after you review and trust it. Run `/hooks` in Codex once after registering it.
-
-The skills' bundled scripts expect to live under `~/.claude/skills/<name>/scripts/`. Under Codex, invoke them from `~/.agents/skills/<name>/scripts/` instead.

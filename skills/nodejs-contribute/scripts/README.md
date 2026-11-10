@@ -1,8 +1,7 @@
 # nodejs-contribute tools
 
-General nodejs/node build/test/CI helpers. Invoke them from the skill
-directory (`~/.claude/skills/nodejs-contribute/scripts/…`). Config via
-env: `REPO` (default `nodejs/node`), `ME` (default `gh api user`).
+General nodejs/node build/test/CI helpers. Invoke them from wherever your
+agent installed the skill. Config via env: `REPO` (default `nodejs/node`), `ME` (default `gh api user`).
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
@@ -15,4 +14,4 @@ env: `REPO` (default `nodejs/node`), `ME` (default `gh api user`).
 repo checked out with `upstream` = `nodejs/node`. Read-only w.r.t. GitHub — none post.
 
 The `nodejs-review-queue` skill also uses `ci-status.sh`/`build-node.sh`/`repro.sh`
-from here (it references them by absolute path rather than duplicating them).
+from here (it refers to this skill by name rather than duplicating them).

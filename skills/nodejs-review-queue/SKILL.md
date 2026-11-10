@@ -90,7 +90,7 @@ If a session's first burst already tripped the limit, run the loop in the backgr
 
 ## Procedure
 
-Prefer the bundled tools over ad-hoc commands. Invoke them by path from each skill's directory (see [Per-tool settings](#per-tool-settings)), written with `~` rather than an expanded home directory.
+Prefer the bundled tools over ad-hoc commands. Invoke them from each skill's `scripts/` directory (see [Per-tool settings](#per-tool-settings)).
 
 | Step | Tool | Lives in |
 |------|------|----------|
@@ -305,7 +305,7 @@ The full networking set is 100+ PRs. Say how many were found and how many you tr
     "Bash(python3:*)", "Bash(grep:*)", "Bash(awk:*)", "Bash(sort:*)", "Bash(uniq:*)", "Bash(jq:*)", "Bash(wc:*)", "Bash(comm:*)", "Bash(head:*)", "Bash(tail:*)"
   ] } }
   ```
-  - Bash rules match the command text literally, so invoke the scripts as written here (`~/.claude/skills/…`), not with an expanded home path.
+  - Claude Code matches Bash rules against the command as typed, so type script paths as `~/.claude/skills/…`, not an expanded home path.
   - Run build and queue work through the skills' `scripts/`, one command each. That avoids two matcher limits: env-var-prefixed commands (`CC="ccache cc" ./configure`) and pipelines, which need every sub-command allowed.
   - Deliberately not allowed, so they still prompt: `git commit`, `push`, `reset`, `rebase`, `gh pr review`, `gh pr comment`, `rm`, `mv`.
 

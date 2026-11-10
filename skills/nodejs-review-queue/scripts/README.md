@@ -1,6 +1,6 @@
 # nodejs-review-queue tools
 
-Review-specific helpers for the skill. Invoke by path from the skill's directory, written with `~`, such as `~/.claude/skills/nodejs-review-queue/scripts/` for Claude Code or `~/.agents/skills/nodejs-review-queue/scripts/` for Codex. Config via env: `REPO` (default `nodejs/node`) and `ME` (default `gh api user`). The tracked team set is `MY_TEAMS` in `lib.sh`.
+Review-specific helpers for the skill. Invoke them from the skill's directory, such as `~/.claude/skills/nodejs-review-queue/scripts/` for Claude Code or `~/.agents/skills/nodejs-review-queue/scripts/` for Codex. Config via env: `REPO` (default `nodejs/node`) and `ME` (default `gh api user`). The tracked team set is `MY_TEAMS` in `lib.sh`.
 
 The build, CI, and repro tools (`build-node.sh`, `ci-status.sh`, `repro.sh`) live in the `nodejs-contribute` skill.
 

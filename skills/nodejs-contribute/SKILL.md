@@ -141,7 +141,7 @@ Overrides: `JOBS=N` for an explicit count; `NICE=1` additionally wraps ninja in 
 - **Experimental surface** (Stability 1) → behavior changes are fine as **patch**, no `semver-major` (e.g. experimental quic/zlib-Zstd/iterable-streams).
 - Add backport labels for changes to APIs already shipped in an LTS/current line.
 
-## Bundled tools (`scripts/`, invoke by path from the skill directory, written with `~`)
+## Bundled tools (`scripts/`, invoke from the skill directory)
 
 `~/.claude/skills/nodejs-contribute/scripts/`:
 - `lib.sh` — shared config (`REPO`/`ME`/`MY_TEAMS`) + `gh_retry` (GitHub secondary-rate-limit backoff).
@@ -149,4 +149,4 @@ Overrides: `JOBS=N` for an explicit count; `NICE=1` additionally wraps ninja in 
 - `ci-status.sh <pr>` — authoritative CI via `ncu-ci`, verified against current head.
 - `repro.sh <pr> <test-path> [runs]` — main-vs-PR-head failure/fix demonstration; auto-builds native addons for node-api/addons tests; returns to `main` and cleans up.
 
-Covered by a permission allow-rule (`Bash(~/.claude/skills/nodejs-contribute/scripts/*)`); invoke them as `~/.claude/skills/…` (the rule matches the command text, not an expanded home path) and run build/CI work through them so they don't re-prompt and work regardless of `~/.zshrc`.
+Covered by a permission allow-rule (`Bash(~/.claude/skills/nodejs-contribute/scripts/*)`); Claude Code matches it against the command as typed, so type script paths as `~/.claude/skills/…`. Run build/CI work through them so they don't re-prompt and work regardless of `~/.zshrc`.

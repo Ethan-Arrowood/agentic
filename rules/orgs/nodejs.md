@@ -10,5 +10,6 @@ Applies to repos in the `nodejs` GitHub org (`nodejs/node`, `nodejs/undici`, …
   Signed-off-by: Ethan Arrowood <ethan@arrowood.dev>
   ```
   The signed-off-by trailer should be generated using the `git commit -s` option, but can also be manually added depending on how the commit is being created.
-- **Which `node`:** to run the project's code or tests, use the locally built `out/Release/node`, not the fnm version from the Node.js runtime rule. Use fnm's Node only for tooling outside the build.
+- **Build in the devcontainer:** configure, build, and test inside the official `nodejs/devcontainer:nightly` image, through the `nodejs-contribute` skill's `devc.sh`. Don't build on the host unless I ask (see the Dev containers rules).
+- **Which `node`:** to run the project's code or tests, use the container's `out/Release/node` (`devc.sh run out/Release/node …`), not the fnm version from the Node.js runtime rule. Use fnm's Node only for tooling outside the build.
 - See the `nodejs-contribute` skill for the build/test/commit/land workflow.

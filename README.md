@@ -18,7 +18,7 @@ Each directory in [`skills/`](skills/) is a self-contained skill: a `SKILL.md` w
 
 | Skill | What it does |
 |-------|--------------|
-| [`nodejs-contribute`](skills/nodejs-contribute/) | Build, test, commit, and land your own changes in a local [`nodejs/node`](https://github.com/nodejs/node) clone. ccache + RAM-aware `ninja` builds, configure-time feature gating (QUIC/DTLS), native-addon tests, DCO commit trailers, authoritative CI status via `ncu-ci`, and the landing/label policy. Ships the shared `build-node.sh`, `ci-status.sh`, and `repro.sh` tools. |
+| [`nodejs-contribute`](skills/nodejs-contribute/) | Build, test, commit, and land your own changes in a local [`nodejs/node`](https://github.com/nodejs/node) clone. Builds and tests in the official `nodejs/devcontainer` nightly image (local ccache build as fallback), configure-time feature gating (QUIC/DTLS), native-addon tests, DCO commit trailers, authoritative CI status via `ncu-ci`, and the landing/label policy. Ships the shared `devc.sh`, `build-node.sh`, `ci-status.sh`, and `repro.sh` tools. |
 | [`nodejs-review-queue`](skills/nodejs-review-queue/) | Surfaces and triages open `nodejs/node` PRs relevant to your subsystem teams, one at a time. Built around how Node.js actually routes reviews (team @-mentions from `nodejs-github-bot`, not individual assignment). Includes a re-review lane for PRs you already reviewed and a cleanup-sweep mode for stalled PRs. **Read-only:** it never posts to GitHub. **Requires `nodejs-contribute`** for its build/CI/repro tools. |
 
 Both Node.js skills are tuned to my setup: they hardcode my GitHub login, nodejs team memberships, and clone location (`~/dev/nodejs/node`). Adjust those before using them yourself. They work in any agent that reads `SKILL.md` skills. Claude Code permission rules for them are in [`agents/claude/README.md`](agents/claude/README.md#permissions-for-the-nodejs-skills).
@@ -32,10 +32,11 @@ Both Node.js skills are tuned to my setup: they hardcode my GitHub login, nodejs
 | [`git.md`](rules/git.md) | Repo layout, scratch-file locations, session-start checks, worktree-first workflow, default commit trailer, Claude Code cloud session exceptions. | Every session |
 | [`posting.md`](rules/posting.md) | Never post without explicit permission, or a pre-approval I give for the current task. Human Voice by default (outline, I write, agent proofreads), with exceptions set by narrower rules. First person and a footer per platform. | Every session |
 | [`writing.md`](rules/writing.md) | Prose style for anything written: project style guide first, then brevity, no filler, short sentences, no em dashes, sparing semicolons, correctness. | Every session |
+| [`dev-containers.md`](rules/dev-containers.md) | Build and test in a project's dev container instead of on the host. Reuse the image's build cache, keep credentials on the host, ask before large pulls or removing volumes. | Building and testing |
 | [`agent-files.md`](rules/agent-files.md) | Prefer `AGENTS.md` over agent-specific instruction files, and keep agent setup tool-agnostic. | Agent config work |
 | [`markdown.md`](rules/markdown.md) | Markdown style defaults, links, and what not to add. Defers to a repo's lint config. | Markdown files |
 | [`lang/node.md`](rules/lang/node.md) | Node.js version resolution and use via fnm. | JS/TS code and `package.json` projects |
-| [`orgs/nodejs.md`](rules/orgs/nodejs.md) | `nodejs` org: DCO trailers (built from the per-tool trailer in `git.md`), built binary vs fnm, defer to each repo's docs. | Repos under `~/dev/nodejs/` |
+| [`orgs/nodejs.md`](rules/orgs/nodejs.md) | `nodejs` org: DCO trailers (built from the per-tool trailer in `git.md`), build and run in the devcontainer instead of fnm, defer to each repo's docs. | Repos under `~/dev/nodejs/` |
 
 ### Layout
 

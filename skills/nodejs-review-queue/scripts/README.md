@@ -2,7 +2,7 @@
 
 Review-specific helpers for the skill. Invoke them from wherever your agent installed the skill. Config via env: `REPO` (default `nodejs/node`) and `ME` (default `gh api user`). The tracked team set is `MY_TEAMS` in `lib.sh`.
 
-The build, CI, and repro tools (`build-node.sh`, `ci-status.sh`, `repro.sh`) live in the `nodejs-contribute` skill.
+The build, CI, and repro tools (`devc.sh`, `ci-status.sh`, `repro.sh`) live in the `nodejs-contribute` skill.
 
 | Tool | Purpose | Notes |
 |------|---------|-------|

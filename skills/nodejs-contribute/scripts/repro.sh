@@ -48,8 +48,19 @@ else
   }
   node_run() { "$DIR/devc.sh" run out/Release/node "$@"; }
 fi
-runN()  { local pass=0 crash=0 fail=0 rc; for i in $(seq 1 $N); do out=$(node_run "$T" 2>&1 </dev/null); rc=$?
+# Run the test N times with the flags from its `// Flags:` line, as
+# tools/test.py does. Without them, a test that imports a flag-gated builtin
+# (node:quic, node:stream/iter) fails at load time on every build. The flags are
+# read once for main and once for the PR, since the test file can differ. The
+# first failure's output is printed, so a "fail" can't hide a setup error.
+runN()  { local pass=0 crash=0 fail=0 rc shown=0 flags
+          flags=(${(z)"$(sed -n 's|^// Flags: ||p' "$T" 2>/dev/null | head -1)"})
+          for i in $(seq 1 $N); do out=$(node_run $flags "$T" 2>&1 </dev/null); rc=$?
             if [ $rc -eq 0 ]; then pass=$((pass+1)); elif [ $rc -gt 128 ]; then crash=$((crash+1)); echo "    run $i: CRASH signal $((rc-128))" >&2; else fail=$((fail+1)); fi
+            if [ $rc -ne 0 ] && [ $shown = 0 ]; then
+              shown=1; echo "    first failure (run $i, exit $rc):" >&2
+              print -r -- "$out" | grep -v '^ *[0-9]*: 0x' | tail -8 | sed 's/^/      /' >&2
+            fi
           done; echo "pass=$pass crash=$crash fail=$fail / $N"; }
 
 [ "${REBASE:-1}" = "1" ] && git rev-parse -q --verify "refs/heads/repro-$n" >/dev/null &&

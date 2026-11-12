@@ -43,8 +43,8 @@ For **reviewing/triaging other people's** PRs (read-only), use the `nodejs-revie
 
 ## One-time setup (per machine)
 
-- **Container engine:** Podman (preferred) or Docker, with its VM sized for compiling. Measured on Podman 6 (libkrun VM, 6 CPUs, 12 GiB). `podman machine inspect` shows the VM's size.
-- **Devcontainer image:** `scripts/devc.sh pull` downloads `nodejs/devcontainer:nightly` (about 10 GB). It's a download, so ask the user first.
+- **Container engine:** Podman (preferred) or Docker, with a VM large enough to compile (6 CPUs and 12 GiB works).
+- **Devcontainer image:** `scripts/devc.sh pull` (about 10 GB, so ask first).
 - **`@node-core/utils`** (`ncu-ci` + `git-node`) and `gh` on the host, for CI status and landing: `npm i -g @node-core/utils`. It reads `~/.ncurc` for the GitHub token.
 
 Only for the [local fallback build](#local-build-fallback-scriptsbuild-nodesh):
@@ -54,36 +54,23 @@ Only for the [local fallback build](#local-build-fallback-scriptsbuild-nodesh):
 
 ## Building in the devcontainer (default): `scripts/devc.sh`
 
-Build and test inside the official [`nodejs/devcontainer:nightly`](https://hub.docker.com/r/nodejs/devcontainer) image, as `doc/contributing/using-devcontainer.md` describes. Fall back to a [local build](#local-build-fallback-scriptsbuild-nodesh) only when the user asks, or the engine or image is unavailable.
-
-Why: the image has the whole toolchain (gcc, ninja, Python, ccache through Nix) and a prebuilt `out/Release` from that night's `main`. A checkout near `main` builds incrementally, and V8 only recompiles if V8 changed since the image was built. Each checkout's `out/` is about 3 GB instead of about 25 GB.
+Build and test inside the official `nodejs/devcontainer:nightly` image through `scripts/devc.sh`. Use the [local build](#local-build-fallback-scriptsbuild-nodesh) only when the user asks, or the engine or image is unavailable.
 
 ```bash
-scripts/devc.sh build              # configure + ninja node
-QUIC=1 scripts/devc.sh build       # only when QUIC is in scope
+scripts/devc.sh build              # configure if needed, then ninja node (background it)
+QUIC=1 scripts/devc.sh build       # only when QUIC is in scope (see below)
 scripts/devc.sh run out/Release/node test/parallel/test-foo.js
 scripts/devc.sh run python3 tools/test.py --mode=release parallel/test-foo
+scripts/devc.sh status             # image age, container, built binary, old volumes
+scripts/devc.sh pull               # newer nightly image, about 10 GB: ask first
 ```
 
-Run `devc.sh` from the checkout (the main clone or a worktree). Background `build`.
-
-What runs where:
-- **Container:** configure, ninja, tests, lint, anything that runs `out/Release/node`. The binary is Linux (arm64 on Apple silicon), so it can't run on the macOS host.
-- **Host:** editing, `git`, `gh`, `ncu-ci`. The checkout is bind-mounted, so edits and branch switches on the host show up in the container right away.
-
-How `devc.sh` works, and the traps it handles (all measured):
-- **One container per checkout** (`node-devc-<dir name>`), with an `out/` volume per checkout and image, plus a shared ccache volume. For a worktree, it also mounts the main clone's `.git` at its host path so `git` works inside.
-- **Reuse the main clone's container for reviews.** A new container takes about 4 minutes to set up and build with a warm ccache (about 90 s of that is `restore-mtime`). To try a PR, use `repro.sh` in the main clone. Use a worktree container for your own longer-lived branches.
-- **Mtimes.** On creation it runs `git restore-mtime`, as the image did, so ninja trusts the prebuilt objects (about 90 s). It then touches every file that differs from the image's commit. Without that, a commit landed between the image's checkout and the end of its build looks older than its object file, and ninja silently skips it. It uses the image's `/usr/bin/git`: the Nix git that direnv puts first on `PATH` can't find `git-restore-mtime`. A marker file records that setup finished, so an interrupted setup reruns.
-- **Never check out an old PR head in a container.** A checkout touches every file that differs, and a PR a few weeks behind `main` rebuilds all of V8 (a 419-commit-old head touched 1,607 V8 files). It also leaves objects that `restore-mtime` can't safely reconcile. `repro.sh` rebases the PR's commits onto `main` in a temporary branch, as CI does. If a stray checkout happens anyway, recreate the `out/` volume (`devc.sh down`, remove the volume, `devc.sh build`).
-- **Configure only when needed.** Every configure re-extracts the ICU data, which regenerates it and the V8 snapshot (about 25 s). `devc.sh build` reruns configure only when its flags, the `lib/**/*.js` list, or a gyp or configure file changed. `RECONFIGURE=1` forces it. A build with nothing to do takes about 7 s.
-- **Configure through `python3 ./configure`, never bare `./configure`.** The image ran `make build-ci`, which uses `python3`. The `./configure` shim picks `python3.14`, and gyp records the interpreter in V8's generator commands. That one path change rebuilt all of V8 (1,422 steps instead of 359).
-- **`--debug-node` makes `DCHECK`s live.** The image's flags compile Node's own C++ with `-O0 -DDEBUG`, so `DCHECK` acts as `CHECK`. CI's Release build compiles them out. A `DCHECK` crash in the container can be a latent bug CI never sees: on `main` at `67e45e4a87b`, 71 of 272 `parallel/test-quic-*` tests crashed this way (for example `Endpoint::local_address()` called from `Endpoint::Receive` while the endpoint is closing). Before calling a crash a PR's regression, check `main` in the same container (`repro.sh` does). Say so when a finding depends on a `DCHECK`.
-- **Use the image's `CONFIG_FLAGS`** (from `shell.nix`: `--with-intl=full-icu --v8-enable-temporal-support --debug-node --ninja --node-builtin-modules-path=…`). Different flags throw away the prebuilt cache. `devc.sh` only appends the experimental flags below.
-- **QUIC is opt-in (`QUIC=1`).** The image is built without it, so a default build on a fresh container is about 50 steps. `QUIC=1` adds the `ngtcp2`/`nghttp3` deps and `src/quic`, and recompiles `src/`, but not V8. On a fresh container that's 359 steps: about 12 minutes on 6 CPUs with a cold ccache, about 40 s with a warm one. Switching an existing `out/` between on and off takes about 30 s with a warm ccache.
-- **New image, new `out/` volume.** After `devc.sh pull`, the next `up` recreates the container on a fresh volume. `devc.sh status` lists volumes from older images with the command to remove them. Never remove volumes without asking.
-- **When to pull:** the further the checkout is from the image's commit, the more it rebuilds. Suggest a pull when the image is over a week old, or right after a V8 update lands on `main`.
-- **Job count:** `min(CPUs, RAM GiB / 2)` inside the VM (6 here). `JOBS=N` overrides it.
+- Run it from the checkout (the main clone or a worktree). Each checkout gets its own container.
+- **In the container:** configure, build, tests, lint, and anything that runs `out/Release/node` (a Linux binary). **On the host:** editing, `git`, `gh`, `ncu-ci`.
+- **Don't run `./configure` or `ninja` by hand in the container.** `devc.sh build` matches the image's flags and interpreter, which keeps its prebuilt cache valid. Anything else can rebuild all of V8. `RECONFIGURE=1` forces a configure.
+- **To try a PR, use `repro.sh` in the main clone.** Never `git checkout` an old PR head: one a few weeks behind `main` rebuilds all of V8. If it happens anyway, ask before recreating the `out/` volume (`devc.sh down`, remove the volume `devc.sh status` lists, `devc.sh build`).
+- **A crash may be a `DCHECK` that CI never sees.** The image builds with `--debug-node`, which turns `DCHECK`s on, and CI's Release build compiles them out. Check `main` in the same container before blaming a PR (`repro.sh` does), and say when a finding depends on a `DCHECK`.
+- A new container takes about 4 minutes to set up and build, so reuse the main clone's for reviews. Suggest `devc.sh pull` when `status` shows an image over a week old. A pull doesn't touch existing containers: a checkout moves to the new image after `devc.sh down`, then `build`. Never remove containers or volumes without asking.
 
 ## Configure-time feature gating (both build paths)
 
@@ -92,7 +79,7 @@ How `devc.sh` works, and the traps it handles (all measured):
 - `process.features.quic` is `false` and `process.versions.ngtcp2` is empty,
 - every `test-quic-*` test silently **skips** via `hasQuic`, so a green test run proves nothing.
 
-**Set `QUIC=1` only when QUIC is in scope:** a `quic:` PR or task, or changes to `lib/quic.js`, `lib/internal/quic/`, `src/quic/`, `deps/ngtcp2/`, or `test/parallel/test-quic-*`. `devc.sh build` and `repro.sh` leave it off otherwise. (`build-node.sh`, the local fallback, still defaults to on; `QUIC=0` turns it off.) Every build prints a `features:` line so you can see what actually landed in the binary. `DTLS=1` adds `--experimental-dtls` (needed for `src/dtls` / `node:dtls` work, e.g. reviewing PRs that touch the shared `src/crypto` TLS/DTLS/QUIC code). Both flags still need their **runtime** flag too — `node --experimental-quic …`.
+**Set `QUIC=1` only when QUIC is in scope:** a `quic:` PR or task, or changes to `lib/quic.js`, `lib/internal/quic/`, `src/quic/`, `deps/ngtcp2/`, or `test/parallel/test-quic-*`. `devc.sh build`, `repro.sh`, and `build-node.sh` leave it off otherwise. Every build prints a `features:` line so you can see what actually landed in the binary. `DTLS=1` adds `--experimental-dtls` (needed for `src/dtls` / `node:dtls` work, e.g. reviewing PRs that touch the shared `src/crypto` TLS/DTLS/QUIC code). Both flags still need their **runtime** flag too — `node --experimental-quic …`.
 
 **`--node-builtin-modules-path` makes the binary load `lib/*.js` from disk.** Both build paths set it. So after one build:
 - **Editing an existing `lib/*.js`** → no rebuild; just run `out/Release/node`.
@@ -103,7 +90,7 @@ How `devc.sh` works, and the traps it handles (all measured):
 Use only when the user asks for a host build, or the devcontainer is unavailable.
 
 ```bash
-CC="ccache cc" CXX="ccache c++" ./configure --ninja --experimental-quic --node-builtin-modules-path "$(pwd)"
+CC="ccache cc" CXX="ccache c++" ./configure --ninja --node-builtin-modules-path "$(pwd)"   # add --experimental-quic only for QUIC work
 ninja -C out/Release node
 ```
 Run it in the **background**, stream output directly (never pipe through `tail` — it hides progress). Reconfigure after every pull that adds/removes files or changes gyp gating; an incremental `ninja` against a stale graph fails with confusing errors.
@@ -116,7 +103,7 @@ Run it in the **background**, stream output directly (never pipe through `tail` 
 
 **Build Debug only when you actually need C++-level debugging** — chasing a crash or memory bug where debug assertions would fire, or stepping in a debugger — and **delete it when done**:
 ```bash
-CC="ccache cc" CXX="ccache c++" ./configure --ninja --experimental-quic --debug
+CC="ccache cc" CXX="ccache c++" ./configure --ninja --debug   # add --experimental-quic only for QUIC work
 ninja -C out/Debug node
 # ... debug ...
 rm -rf out/Debug
@@ -190,7 +177,7 @@ Paths are relative to this skill's directory. The `nodejs-review-queue` skill us
 
 - `lib.sh` — shared config (`REPO`/`ME`/`MY_TEAMS`) + `gh_retry` (GitHub secondary-rate-limit backoff).
 - `devc.sh <up|build|run|sh|status|pull|down>`: the default build and test environment: the nightly devcontainer, one container per checkout (run from the checkout; background `build`). Env toggles: `QUIC=1` (off by default), `DTLS=1`, `JOBS=N`, `RECONFIGURE=1`, `DEVC_ENGINE`, `DEVC_IMAGE`. See [Building in the devcontainer](#building-in-the-devcontainer-default-scriptsdevcsh).
-- `build-node.sh`: local fallback, ccache reconfigure + `ninja` on the host (run from repo root; background it). Env toggles: `QUIC=0` (default on), `DTLS=1`, `JOBS=N` (default `min(ncpu, RAM_GB/3)`), `NICE=1` (macOS background QoS). Prints the resolved configure args, the chosen `-j`, and a `features:` line on success.
+- `build-node.sh`: local fallback, ccache reconfigure + `ninja` on the host (run from repo root; background it). Env toggles: `QUIC=1` (off by default), `DTLS=1`, `JOBS=N` (default `min(ncpu, RAM_GB/3)`), `NICE=1` (macOS background QoS). Prints the resolved configure args, the chosen `-j`, and a `features:` line on success.
 - `ci-status.sh <pr>` — authoritative CI via `ncu-ci`, verified against current head.
 - `repro.sh <pr> <test-path> [runs]` — main-vs-PR failure/fix demonstration with the PR rebased onto main (`REBASE=0` for the head as-is); builds and runs in the devcontainer (`LOCAL=1` for the host); auto-builds native addons for node-api/addons tests; returns to `main` and cleans up.
 

@@ -7,8 +7,8 @@
 # Experimental subsystems are gated at CONFIGURE time, not just by a runtime
 # flag. Without the configure flag the module is absent from the binary and
 # `import 'node:<mod>'` throws ERR_UNKNOWN_BUILTIN_MODULE with nothing pointing
-# at the build as the cause. QUIC defaults ON (Ethan is on @nodejs/quic).
-#   QUIC=0  -> omit --experimental-quic
+# at the build as the cause. QUIC is opt-in, only when QUIC work is in scope.
+#   QUIC=1  -> add --experimental-quic
 #   DTLS=1  -> add   --experimental-dtls  (needed for src/dtls + node:dtls work)
 #
 # Parallelism: ninja defaults to ncpu+2. A V8 translation unit peaks at roughly
@@ -20,7 +20,7 @@
 export CC="ccache cc" CXX="ccache c++"
 
 configure_args=(--ninja --node-builtin-modules-path "$(pwd)")
-[[ "${QUIC:-1}" != "0" ]] && configure_args+=(--experimental-quic)
+[[ "${QUIC:-0}" == "1" ]] && configure_args+=(--experimental-quic)
 [[ "${DTLS:-0}" == "1" ]] && configure_args+=(--experimental-dtls)
 
 # --- job count -------------------------------------------------------------

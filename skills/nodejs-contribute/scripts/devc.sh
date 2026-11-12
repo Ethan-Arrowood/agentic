@@ -5,15 +5,18 @@
 # incrementally instead of compiling V8 from scratch.
 #
 # Run from a nodejs/node checkout or one of its worktrees. Each checkout gets
-# its own container, named node-devc-<checkout dir name>.
+# its own container, named node-devc-<dir name>-<path hash>.
 #
 #   devc.sh up            start or reuse this checkout's container
-#   devc.sh build         configure, then `ninja node`; prints a features line
-#   devc.sh run <cmd...>  run a command in the checkout inside the Nix env
+#   devc.sh build         configure if needed, then `ninja node`; prints a features line
+#   devc.sh run <cmd...>  run a command in the checkout inside the Nix env (stdin passes through)
 #   devc.sh sh            interactive shell in the container
 #   devc.sh status        image, container, volumes, and the built binary
 #   devc.sh pull          pull the latest nightly image (about 10 GB)
 #   devc.sh down          remove this checkout's container; keeps volumes
+#
+# A container keeps its image after a pull. `down`, then `build`, moves the
+# checkout to the new image (and a new out/ volume).
 #
 # Env:
 #   QUIC=1       add --experimental-quic (off by default; only when QUIC is in scope)
@@ -27,16 +30,29 @@ set -euo pipefail
 IMAGE="${DEVC_IMAGE:-docker.io/nodejs/devcontainer:nightly}"
 ENGINE="${DEVC_ENGINE:-$(command -v podman || command -v docker || true)}"
 WS=/home/developer/nodejs/node
-READY=/home/developer/.devc-ready   # in the container's own filesystem
+READY=/home/developer/.devc-ready   # container setup done (container filesystem)
+MTIMES=$WS/out/.devc-mtimes         # mtimes restored for this out/ volume
 
 die() { echo "devc: $*" >&2; exit 1; }
+usage() { sed -n "2,/^set -e/p" "$0" | grep "^#" | sed "s/^# \{0,1\}//"; exit 2; }
+case "${1:-}" in up|build|run|sh|status|pull|down) ;; *) usage ;; esac
 [ -n "$ENGINE" ] || die "needs podman or docker on PATH"
 
 root=$(git rev-parse --show-toplevel 2>/dev/null) || die "run from a nodejs/node checkout"
 [ -f "$root/node.gyp" ] || die "$root is not a nodejs/node checkout"
 common=$(cd "$root" && cd "$(git rev-parse --git-common-dir)" && pwd -P)
-key=$(basename "$root" | tr -c 'A-Za-z0-9_.\n-' '-')
+# The dir name alone collides for two clones both named `node`.
+key="$(basename "$root" | tr -c 'A-Za-z0-9_.\n-' '-')-$(printf %s "$root" | cksum | cut -d' ' -f1)"
 name="node-devc-$key"
+
+# Loads the Nix env that direnv provides, and fails if it didn't load. A denied
+# or broken .envrc makes `direnv export` print nothing, so the eval succeeds
+# with no toolchain and no CONFIG_FLAGS, and configure would drop the image's
+# flags (rebuilding all of V8).
+# shellcheck disable=SC2016 # expands inside the container
+NIX_ENV='eval "$(direnv export bash 2>/dev/null)"
+[ -n "${CONFIG_FLAGS:-}" ] || { echo "devc: the Nix env did not load (direnv). Try: devc.sh down, then devc.sh build" >&2; exit 1; }
+'
 
 image_id() {
   local id
@@ -48,25 +64,24 @@ image_id() {
 
 # Run a shell snippet in the checkout, inside the Nix env that direnv loads.
 in_ctr() {
-  # shellcheck disable=SC2016 # expands inside the container
-  "$ENGINE" exec -w "$WS" "$name" bash -lc \
-    'eval "$(direnv export bash 2>/dev/null)"; '"$1"
+  "$ENGINE" exec -w "$WS" "$name" bash -lc "$NIX_ENV$1"
 }
 
 up() {
   local img cur state commit
   img=$(image_id)
   if "$ENGINE" container inspect "$name" >/dev/null 2>&1; then
+    # Reuse the container even after a pull. Replacing it here would kill
+    # anything running in it, and `run` would then use the new image's
+    # prebuilt binary instead of this checkout's build.
     cur=$("$ENGINE" container inspect "$name" --format '{{.Image}}')
     cur=${cur#sha256:}
-    if [ "${cur:0:12}" = "$img" ]; then
-      state=$("$ENGINE" container inspect "$name" --format '{{.State.Running}}')
-      [ "$state" = "true" ] || "$ENGINE" start "$name" >/dev/null
-      "$ENGINE" exec "$name" test -e "$READY" || setup
-      return 0
-    fi
-    echo "devc: $name is on an older image; recreating it on $img" >&2
-    "$ENGINE" rm -f "$name" >/dev/null
+    [ "${cur:0:12}" = "$img" ] ||
+      echo "devc: $name uses a different image (${cur:0:12}) than $IMAGE ($img). To move: devc.sh down, then devc.sh build." >&2
+    state=$("$ENGINE" container inspect "$name" --format '{{.State.Running}}')
+    [ "$state" = "true" ] || "$ENGINE" start "$name" >/dev/null
+    "$ENGINE" exec "$name" test -e "$READY" || setup
+    return 0
   fi
 
   # The commit the image's prebuilt out/ was compiled from.
@@ -90,14 +105,14 @@ up() {
   setup
 }
 
-# One-time setup for a new container. Writes a marker when it finishes, so a
-# setup that failed partway reruns on the next `up` instead of leaving a
-# container with the wrong mtimes.
+# Setup for a new container. Markers record each finished step, so a setup that
+# failed partway reruns on the next `up`.
 setup() {
   local commit
   commit=$("$ENGINE" container inspect "$name" --format '{{index .Config.Labels "devc.image-commit"}}')
 
-  # Same setup as .devcontainer/base/devcontainer.json.
+  # Same setup as .devcontainer/base/devcontainer.json. Per container: direnv's
+  # allow list lives in the container's filesystem.
   "$ENGINE" exec -w "$WS" "$name" bash -c \
     'cp ~/envrc/static-libs.envrc .envrc && direnv allow .'
 
@@ -106,16 +121,25 @@ setup() {
   # commit. A commit can land after the image's checkout but before its build
   # finished, and restore-mtime would make that file look older than its
   # object, so ninja would silently skip it.
+  #
+  # Only once per out/ volume, while it still holds just the image's objects.
+  # After builds, restoring mtimes again can make a reverted source file look
+  # older than an object compiled from a branch, so ninja would keep the stale
+  # object. A recreated container on the same volume skips this step.
+  #
   # Use the image's /usr/bin/git: git-restore-mtime is in its exec path
   # (/usr/lib/git-core), not in the Nix git that direnv puts first on PATH.
-  git -C "$root" cat-file -e "$commit^{commit}" 2>/dev/null ||
-    git -C "$root" fetch -q upstream main
-  echo "devc: restoring mtimes (about 90 s)" >&2
-  "$ENGINE" exec -w "$WS" "$name" bash -c "
-    set -eo pipefail
-    /usr/bin/git restore-mtime --quiet
-    /usr/bin/git diff --no-renames --name-only -z $commit HEAD | xargs -0r touch -c
-    touch $READY"
+  if ! "$ENGINE" exec "$name" test -e "$MTIMES"; then
+    git -C "$root" cat-file -e "$commit^{commit}" 2>/dev/null ||
+      git -C "$root" fetch -q upstream main
+    echo "devc: restoring mtimes (about 90 s)" >&2
+    "$ENGINE" exec -w "$WS" "$name" bash -c "
+      set -eo pipefail
+      /usr/bin/git restore-mtime --quiet
+      /usr/bin/git diff --no-renames --name-only -z $commit HEAD | xargs -0r touch -c
+      touch $MTIMES"
+  fi
+  "$ENGINE" exec "$name" touch "$READY"
 }
 
 build() {
@@ -129,25 +153,33 @@ build() {
   #
   # Skip configure when nothing it reads changed. Each run re-extracts the ICU
   # data, which regenerates it and the V8 snapshot (about 25 s). The stamp holds
-  # the command and the lib/**/*.js list, which configure bakes into the
-  # build. Gyp and configure files newer than the stamp also force a rerun.
-  # RECONFIGURE=1 forces one.
+  # the command, the lib/**/*.js list (configure bakes it into the build), and
+  # a hash of config.gypi. configure writes config.gypi into the shared
+  # checkout, so a host build overwrites it, and the hash catches that. Any
+  # tracked .gyp/.gypi file, configure, configure.py, or src/node_version.h
+  # newer than the stamp also forces a rerun. RECONFIGURE=1 forces one.
+  #
+  # One build per checkout at a time: a second would rewrite the configure
+  # output and ninja files under the first.
   in_ctr "
     set -eo pipefail
+    exec 9>out/.devc-lock
+    flock -n 9 || { echo 'devc: another build is running in this checkout' >&2; exit 1; }
     jobs=${JOBS:-}
     if [ -z \"\$jobs\" ]; then
       mem=\$(awk '/MemTotal/ {print int(\$2 / 1048576)}' /proc/meminfo)
       jobs=\$(( mem / 2 )); [ \$jobs -gt \$(nproc) ] && jobs=\$(nproc); [ \$jobs -lt 2 ] && jobs=2
     fi
     cmd=\"python3 ./configure --verbose \$CONFIG_FLAGS$extra\"
-    want=\$(printf '%s\n' \"\$cmd\"; find lib -name '*.js' | sort)
+    inputs() { printf '%s\n' \"\$cmd\"; find lib -name '*.js' | sort; md5sum config.gypi 2>/dev/null || echo 'no config.gypi'; }
     stamp=out/.devc-configure
-    newer=\$(find configure configure.py node.gyp node.gypi common.gypi tools/v8_gypfiles deps/*/*.gyp* \
-      -newer \$stamp \\( -name '*.gyp*' -o -name 'configure*' \\) -print -quit 2>/dev/null || true)
-    if [ '${RECONFIGURE:-0}' = 1 ] || [ ! -f \$stamp ] || [ \"\$want\" != \"\$(cat \$stamp)\" ] || [ -n \"\$newer\" ]; then
+    newest=\$(git ls-files -z -- configure configure.py src/node_version.h '*.gyp' '*.gypi' \
+      ':!test/' ':!benchmark/' ':!tools/gyp/test/' | xargs -0 stat -c %Y | sort -n | tail -1)
+    if [ '${RECONFIGURE:-0}' = 1 ] || [ ! -f \$stamp ] || [ \"\$(inputs)\" != \"\$(cat \$stamp)\" ] ||
+       [ \"\$newest\" -gt \"\$(stat -c %Y \$stamp)\" ]; then
       echo \"=== configure @ \$(date +%H:%M:%S): \$CONFIG_FLAGS$extra\"
       \$cmd >out/configure.log 2>&1 || { tail -20 out/configure.log; exit 1; }
-      printf '%s\n' \"\$want\" > \$stamp
+      inputs > \$stamp
     else
       echo '=== configure: unchanged, skipped (RECONFIGURE=1 forces it)'
     fi
@@ -163,9 +195,12 @@ build() {
 run() {
   [ $# -gt 0 ] || die "usage: devc.sh run <cmd...>"
   up
+  # -i passes stdin through, so `... | devc.sh run out/Release/node -` works.
   # shellcheck disable=SC2016 # expands inside the container
-  "$ENGINE" exec -w "$WS" "$name" bash -lc \
-    'eval "$(direnv export bash 2>/dev/null)"; exec "$@"' bash "$@"
+  "$ENGINE" exec -i -w "$WS" "$name" bash -lc "$NIX_ENV"'
+    [ -f out/.devc-configure ] ||
+      echo "devc: warning: no devc.sh build in this out/ yet, so out/Release/node is the image prebuilt binary" >&2
+    exec "$@"' bash "$@"
 }
 
 status() {
@@ -182,8 +217,10 @@ status() {
   echo "volumes:"
   "$ENGINE" volume ls --format '{{.Name}}' | grep '^node-devc-' | while read -r v; do
     case "$v" in
-      node-devc-out-*-"$img"|node-devc-ccache) echo "  $v" ;;
-      *) echo "  $v (older image; remove with: $(basename "$ENGINE") volume rm $v)" ;;
+      node-devc-ccache) echo "  $v (shared ccache)" ;;
+      node-devc-out-"$key"-"$img") echo "  $v (this checkout, current image)" ;;
+      node-devc-out-*-"$img") echo "  $v (another checkout, current image)" ;;
+      *) echo "  $v (older image or naming; remove with: $(basename "$ENGINE") volume rm $v)" ;;
     esac
   done
 }
@@ -194,7 +231,7 @@ case "${1:-}" in
   run) shift; run "$@" ;;
   sh) up; "$ENGINE" exec -it -w "$WS" "$name" bash -l ;;
   status) status ;;
-  pull) "$ENGINE" pull "$IMAGE" && echo "devc: pulled. The next 'up' recreates containers on the new image." ;;
+  pull) "$ENGINE" pull "$IMAGE" && echo "devc: pulled. Containers keep their image until 'devc.sh down'; the next build then uses the new one." ;;
   down) "$ENGINE" rm -f "$name" >/dev/null && echo "devc: removed $name (volumes kept)" ;;
-  *) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) usage ;;
 esac

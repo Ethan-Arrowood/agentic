@@ -16,7 +16,7 @@
 #   devc.sh down          remove this checkout's container; keeps volumes
 #
 # Env:
-#   QUIC=0       omit --experimental-quic (on by default)
+#   QUIC=1       add --experimental-quic (off by default; only when QUIC is in scope)
 #   DTLS=1       add --experimental-dtls
 #   JOBS=N       ninja job count (default: min(CPUs, RAM GiB / 2) in the VM)
 #   RECONFIGURE=1  rerun configure even if nothing it reads changed
@@ -121,7 +121,7 @@ setup() {
 build() {
   up
   local extra=""
-  [ "${QUIC:-1}" = "0" ] || extra="$extra --experimental-quic"
+  [ "${QUIC:-0}" = "1" ] && extra="$extra --experimental-quic"
   [ "${DTLS:-0}" = "1" ] && extra="$extra --experimental-dtls"
   # Configure through `python3`, as `make build-ci` did for the image. The
   # ./configure shim picks python3.14 instead, which changes the command line

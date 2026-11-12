@@ -32,11 +32,10 @@ Both Node.js skills are tuned to my setup: they hardcode my GitHub login, nodejs
 | [`git.md`](rules/git.md) | Repo layout, scratch-file locations, session-start checks, worktree-first workflow, default commit trailer, Claude Code cloud session exceptions. | Every session |
 | [`posting.md`](rules/posting.md) | Never post without explicit permission, or a pre-approval I give for the current task. Human Voice by default (outline, I write, agent proofreads), with exceptions set by narrower rules. First person and a footer per platform. | Every session |
 | [`writing.md`](rules/writing.md) | Prose style for anything written: project style guide first, then brevity, no filler, short sentences, no em dashes, sparing semicolons, correctness. | Every session |
-| [`dev-containers.md`](rules/dev-containers.md) | Build and test in a project's dev container instead of on the host. Reuse the image's build cache, keep credentials on the host, ask before large pulls or removing volumes. | Building and testing |
 | [`agent-files.md`](rules/agent-files.md) | Prefer `AGENTS.md` over agent-specific instruction files, and keep agent setup tool-agnostic. | Agent config work |
 | [`markdown.md`](rules/markdown.md) | Markdown style defaults, links, and what not to add. Defers to a repo's lint config. | Markdown files |
 | [`lang/node.md`](rules/lang/node.md) | Node.js version resolution and use via fnm. | JS/TS code and `package.json` projects |
-| [`orgs/nodejs.md`](rules/orgs/nodejs.md) | `nodejs` org: DCO trailers (built from the per-tool trailer in `git.md`), build and run in the devcontainer instead of fnm, defer to each repo's docs. | Repos under `~/dev/nodejs/` |
+| [`orgs/nodejs.md`](rules/orgs/nodejs.md) | `nodejs` org: DCO trailers (built from the per-tool trailer in `git.md`), build, test, and run in the `nodejs/devcontainer` image (not on the host or with fnm), defer to each repo's docs. | Repos under `~/dev/nodejs/` |
 
 ### Layout
 

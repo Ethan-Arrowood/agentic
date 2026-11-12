@@ -74,7 +74,7 @@ The local clone is `~/dev/nodejs/node`. Environment setup and building live in t
 1. Run `git status`. If the tree is dirty, stop and ask whether to stash, commit, or keep going.
 2. If on a branch other than `main`, say so and ask before switching.
 3. Otherwise update `main`: `git fetch upstream main && git checkout main && git pull --ff-only upstream main`.
-4. Run the `nodejs-contribute` skill's `scripts/devc.sh status`. If the image is over a week old, ask the user whether to `devc.sh pull` it (about 10 GB). Then start `devc.sh build` in the background before building the queue, so the binary is ready when the user picks a PR to try. On an up-to-date tree it's a no-op.
+4. Run the `nodejs-contribute` skill's `scripts/devc.sh status`. If the image is over a week old, ask the user whether to `devc.sh pull` it (about 10 GB). Then start `devc.sh build` in the background before building the queue (with `QUIC=1` only when the session is QUIC work, as `nodejs-contribute` defines it), so the binary is ready when the user picks a PR to try. On an up-to-date tree it's a no-op.
 
 ## GitHub rate limits
 
@@ -156,7 +156,7 @@ Surface process state with the code:
 
 **Read the PR's code, not just the diff or stale local `main`.** Run `git fetch upstream pull/<n>/head:pr-<n>`, then `git show pr-<n>:<path>`. This doesn't touch the working tree and gives PR-accurate line numbers. Delete the `pr-<n>` ref when done.
 
-**For complex PRs (new APIs or events, tricky lifecycle), build and demonstrate claimed failure modes** such as crashes, wire corruption, or double emits. Don't only trace them. Use `nodejs-contribute`'s `scripts/repro.sh <pr> <test-path> [runs]`, which builds `main` and the PR rebased onto `main` and runs each N times, or `devc.sh build` plus a manual scenario through `devc.sh run`. Report the observed output, including a repro that did not reproduce (that kills the finding).
+**For complex PRs (new APIs or events, tricky lifecycle), build and demonstrate claimed failure modes** such as crashes, wire corruption, or double emits. Don't only trace them. Use `nodejs-contribute`'s `scripts/repro.sh <pr> <test-path> [runs]` (`QUIC=1` for a QUIC PR), which builds `main` and the PR rebased onto `main` and runs each N times, or `devc.sh build` plus a manual scenario through `devc.sh run`. Report the observed output, including a repro that did not reproduce (that kills the finding).
 
 Give a structured summary in chat:
 

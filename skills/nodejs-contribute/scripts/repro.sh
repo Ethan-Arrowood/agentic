@@ -9,9 +9,9 @@
 # The PR's commits are rebased onto main in a temporary repro-<n> branch, as
 # CI does, so the build is incremental. REBASE=0 builds the PR head as-is.
 #
-# Builds and runs inside the devcontainer through devc.sh (QUIC on by default).
-# LOCAL=1 builds and runs on the host instead, with ccache and build-node.sh's
-# configure flags.
+# Builds and runs inside the devcontainer through devc.sh. QUIC=1 adds
+# --experimental-quic, for QUIC PRs only.
+# LOCAL=1 builds and runs on the host instead, with ccache.
 #
 # Native-addon tests are handled automatically: a test path under
 # test/node-api/, test/js-native-api/, or test/addons/ needs its addon compiled
@@ -33,7 +33,8 @@ esac
 if [ "${LOCAL:-0}" = "1" ]; then
   export CC="ccache cc" CXX="ccache c++"
   build() {
-    ./configure --ninja --experimental-quic --node-builtin-modules-path "$(pwd)" >/dev/null 2>&1 || return 1
+    local quic=""; [ "${QUIC:-0}" = "1" ] && quic="--experimental-quic"
+    ./configure --ninja $quic --node-builtin-modules-path "$(pwd)" >/dev/null 2>&1 || return 1
     ninja -C out/Release node >/dev/null 2>&1 || return 1
     [ -n "$ADDON_TARGET" ] && { echo "    (building addons: make $ADDON_TARGET)" >&2; make "$ADDON_TARGET" >/dev/null 2>&1; }
     return 0

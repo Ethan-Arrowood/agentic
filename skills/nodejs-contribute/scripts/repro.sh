@@ -6,6 +6,9 @@
 # Usage: repro.sh <pr> <test-path> [runs]        (run from the node repo root)
 #   e.g. repro.sh 64623 test/parallel/test-http2-respond-with-file-connection-abort.js 25
 #
+# The PR's commits are rebased onto main in a temporary repro-<n> branch, as
+# CI does, so the build is incremental. REBASE=0 builds the PR head as-is.
+#
 # Builds and runs inside the devcontainer through devc.sh (QUIC on by default).
 # LOCAL=1 builds and runs on the host instead, with ccache and build-node.sh's
 # configure flags.
@@ -53,9 +56,25 @@ git checkout main >/dev/null 2>&1; build || exit 1
 echo "  main $(git rev-parse --short HEAD): $(runN)"
 
 echo "== PR #$n =="
-git fetch upstream "pull/$n/head:pr-$n" >/dev/null 2>&1
-git checkout "pr-$n" >/dev/null 2>&1; build || { git checkout main >/dev/null 2>&1; exit 1; }
-echo "  pr-$n $(git rev-parse --short HEAD): $(runN)"
+cleanup() { git checkout main >/dev/null 2>&1; git branch -D "pr-$n" "repro-$n" >/dev/null 2>&1; }
+git fetch upstream "pull/$n/head:pr-$n" >/dev/null 2>&1 || { echo "  fetch of pull/$n/head failed" >&2; exit 1; }
+if [ "${REBASE:-1}" = "1" ]; then
+  # Test the PR's commits on top of main, as CI does (REBASE_ONTO). Checking out
+  # an old PR head instead touches every file that changed since its base, and a
+  # PR a few weeks behind main rebuilds all of V8.
+  mb=$(git merge-base main "pr-$n")
+  echo "  rebasing $(git rev-list --count "$mb..pr-$n") commit(s) onto main ($(git rev-list --count "$mb..main") behind)"
+  git branch -f "repro-$n" "pr-$n" >/dev/null 2>&1
+  if ! git rebase -q --onto main "$mb" "repro-$n" >/dev/null 2>&1; then
+    git rebase --abort >/dev/null 2>&1; cleanup
+    echo "  PR #$n conflicts with main. REBASE=0 builds its head as-is (rebuilds everything that differs, possibly V8)." >&2
+    exit 1
+  fi
+else
+  git checkout "pr-$n" >/dev/null 2>&1
+fi
+build || { cleanup; exit 1; }
+echo "  pr-$n $(git rev-parse --short "pr-$n") on $(git rev-parse --short HEAD): $(runN)"
 
-git checkout main >/dev/null 2>&1; git branch -D "pr-$n" >/dev/null 2>&1
+cleanup
 echo "(returned to main baseline)"

@@ -156,7 +156,7 @@ Surface process state with the code:
 
 **Read the PR's code, not just the diff or stale local `main`.** Run `git fetch upstream pull/<n>/head:pr-<n>`, then `git show pr-<n>:<path>`. This doesn't touch the working tree and gives PR-accurate line numbers. Delete the `pr-<n>` ref when done.
 
-**For complex PRs (new APIs or events, tricky lifecycle), build and demonstrate claimed failure modes** such as crashes, wire corruption, or double emits. Don't only trace them. Use `nodejs-contribute`'s `scripts/repro.sh <pr> <test-path> [runs]`, which builds `main` and the PR head and runs each N times, or `devc.sh build` plus a manual scenario through `devc.sh run`. Report the observed output, including a repro that did not reproduce (that kills the finding).
+**For complex PRs (new APIs or events, tricky lifecycle), build and demonstrate claimed failure modes** such as crashes, wire corruption, or double emits. Don't only trace them. Use `nodejs-contribute`'s `scripts/repro.sh <pr> <test-path> [runs]`, which builds `main` and the PR rebased onto `main` and runs each N times, or `devc.sh build` plus a manual scenario through `devc.sh run`. Report the observed output, including a repro that did not reproduce (that kills the finding).
 
 Give a structured summary in chat:
 

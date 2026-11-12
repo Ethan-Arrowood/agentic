@@ -19,6 +19,7 @@
 #   QUIC=0       omit --experimental-quic (on by default)
 #   DTLS=1       add --experimental-dtls
 #   JOBS=N       ninja job count (default: min(CPUs, RAM GiB / 2) in the VM)
+#   RECONFIGURE=1  rerun configure even if nothing it reads changed
 #   DEVC_ENGINE  podman or docker (default: whichever is on PATH, podman first)
 #   DEVC_IMAGE   image reference (default: docker.io/nodejs/devcontainer:nightly)
 set -euo pipefail
@@ -26,6 +27,7 @@ set -euo pipefail
 IMAGE="${DEVC_IMAGE:-docker.io/nodejs/devcontainer:nightly}"
 ENGINE="${DEVC_ENGINE:-$(command -v podman || command -v docker || true)}"
 WS=/home/developer/nodejs/node
+READY=/home/developer/.devc-ready   # in the container's own filesystem
 
 die() { echo "devc: $*" >&2; exit 1; }
 [ -n "$ENGINE" ] || die "needs podman or docker on PATH"
@@ -60,6 +62,7 @@ up() {
     if [ "${cur:0:12}" = "$img" ]; then
       state=$("$ENGINE" container inspect "$name" --format '{{.State.Running}}')
       [ "$state" = "true" ] || "$ENGINE" start "$name" >/dev/null
+      "$ENGINE" exec "$name" test -e "$READY" || setup
       return 0
     fi
     echo "devc: $name is on an older image; recreating it on $img" >&2
@@ -84,18 +87,35 @@ up() {
   "$ENGINE" run -d --name "$name" --label "devc.image-commit=$commit" \
     "${mounts[@]}" -w "$WS" --entrypoint sleep "$IMAGE" infinity >/dev/null
 
+  setup
+}
+
+# One-time setup for a new container. Writes a marker when it finishes, so a
+# setup that failed partway reruns on the next `up` instead of leaving a
+# container with the wrong mtimes.
+setup() {
+  local commit
+  commit=$("$ENGINE" container inspect "$name" --format '{{index .Config.Labels "devc.image-commit"}}')
+
   # Same setup as .devcontainer/base/devcontainer.json.
-  in_ctr 'cp ~/envrc/static-libs.envrc .envrc && direnv allow .'
+  "$ENGINE" exec -w "$WS" "$name" bash -c \
+    'cp ~/envrc/static-libs.envrc .envrc && direnv allow .'
 
   # Match the image's build cache: set each file's mtime to its last commit
   # time, as the image did. Then touch every file that differs from the image's
   # commit. A commit can land after the image's checkout but before its build
   # finished, and restore-mtime would make that file look older than its
   # object, so ninja would silently skip it.
+  # Use the image's /usr/bin/git: git-restore-mtime is in its exec path
+  # (/usr/lib/git-core), not in the Nix git that direnv puts first on PATH.
   git -C "$root" cat-file -e "$commit^{commit}" 2>/dev/null ||
     git -C "$root" fetch -q upstream main
   echo "devc: restoring mtimes (about 90 s)" >&2
-  in_ctr "git restore-mtime --quiet && git diff --name-only -z $commit HEAD | xargs -0r touch -c"
+  "$ENGINE" exec -w "$WS" "$name" bash -c "
+    set -eo pipefail
+    /usr/bin/git restore-mtime --quiet
+    /usr/bin/git diff --no-renames --name-only -z $commit HEAD | xargs -0r touch -c
+    touch $READY"
 }
 
 build() {
@@ -106,22 +126,37 @@ build() {
   # Configure through `python3`, as `make build-ci` did for the image. The
   # ./configure shim picks python3.14 instead, which changes the command line
   # of V8's generator steps and rebuilds all of V8.
+  #
+  # Skip configure when nothing it reads changed. Each run re-extracts the ICU
+  # data, which regenerates it and the V8 snapshot (about 25 s). The stamp holds
+  # the command and the lib/**/*.js list, which configure bakes into the
+  # build. Gyp and configure files newer than the stamp also force a rerun.
+  # RECONFIGURE=1 forces one.
   in_ctr "
-    set -e
+    set -eo pipefail
     jobs=${JOBS:-}
     if [ -z \"\$jobs\" ]; then
       mem=\$(awk '/MemTotal/ {print int(\$2 / 1048576)}' /proc/meminfo)
       jobs=\$(( mem / 2 )); [ \$jobs -gt \$(nproc) ] && jobs=\$(nproc); [ \$jobs -lt 2 ] && jobs=2
     fi
-    echo \"=== configure @ \$(date +%H:%M:%S): \$CONFIG_FLAGS$extra\"
-    python3 ./configure --verbose \$CONFIG_FLAGS$extra >out/configure.log 2>&1 ||
-      { tail -20 out/configure.log; exit 1; }
+    cmd=\"python3 ./configure --verbose \$CONFIG_FLAGS$extra\"
+    want=\$(printf '%s\n' \"\$cmd\"; find lib -name '*.js' | sort)
+    stamp=out/.devc-configure
+    newer=\$(find configure configure.py node.gyp node.gypi common.gypi tools/v8_gypfiles deps/*/*.gyp* \
+      -newer \$stamp \\( -name '*.gyp*' -o -name 'configure*' \\) -print -quit 2>/dev/null || true)
+    if [ '${RECONFIGURE:-0}' = 1 ] || [ ! -f \$stamp ] || [ \"\$want\" != \"\$(cat \$stamp)\" ] || [ -n \"\$newer\" ]; then
+      echo \"=== configure @ \$(date +%H:%M:%S): \$CONFIG_FLAGS$extra\"
+      \$cmd >out/configure.log 2>&1 || { tail -20 out/configure.log; exit 1; }
+      printf '%s\n' \"\$want\" > \$stamp
+    else
+      echo '=== configure: unchanged, skipped (RECONFIGURE=1 forces it)'
+    fi
     echo \"=== ninja -j\$jobs @ \$(date +%H:%M:%S)\"
     ninja -C out/Release -j\$jobs node
     echo \"=== done @ \$(date +%H:%M:%S)\"
     out/Release/node --experimental-quic -p \"'features: quic=' + process.features.quic +
       ' dtls=' + process.features.dtls + ' ngtcp2=' + (process.versions.ngtcp2 || 'n/a')\" 2>/dev/null
-    ccache -s | grep -iE 'hits' | head -2
+    ccache -s | grep -i -m1 hits
   "
 }
 

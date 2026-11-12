@@ -1,6 +1,6 @@
 ---
 name: nodejs-contribute
-description: Build, test, commit, and land your own changes in a local nodejs/node clone — ccache-enabled builds, running tests (including node-api addon tests), DCO-signed commits, and driving a PR through CI to landing. Use when working on or finishing a nodejs/node PR or fix (building, testing, committing, pushing, or landing), NOT when reviewing others' PRs.
+description: Build, test, commit, and land your own changes in a local nodejs/node clone — builds and tests in the official nightly devcontainer (local ccache build as fallback), running tests (including node-api addon tests), DCO-signed commits, and driving a PR through CI to landing. Use when working on or finishing a nodejs/node PR or fix (building, testing, committing, pushing, or landing), NOT when reviewing others' PRs.
 metadata:
   author: Ethan Arrowood
   tags: nodejs, github, contributing, build, testing, git, pull-requests
@@ -43,24 +43,57 @@ For **reviewing/triaging other people's** PRs (read-only), use the `nodejs-revie
 
 ## One-time setup (per machine)
 
+- **Container engine:** Podman (preferred) or Docker, with a VM large enough to compile (6 CPUs and 12 GiB works).
+- **Devcontainer image:** `scripts/devc.sh pull` (about 10 GB, so ask first).
+- **`@node-core/utils`** (`ncu-ci` + `git-node`) and `gh` on the host, for CI status and landing: `npm i -g @node-core/utils`. It reads `~/.ncurc` for the GitHub token.
+
+Only for the [local fallback build](#local-build-fallback-scriptsbuild-nodesh):
+
 - **ccache** — the review/dev loop rebuilds C++ and switches branches constantly; ~2,000 of Node's ~3,300 targets are V8/deps identical across branches. Check `which ccache`; if missing (macOS): `brew install ccache`, add `export CC="ccache cc"` / `export CXX="ccache c++"` to `~/.zshrc`, and `ccache -M 25G` (V8 objects are large; the 5GB default thrashes). Linux: `apt install ccache mold` + `CC="ccache gcc"`/`CXX="ccache g++"`/`LDFLAGS="-fuse-ld=mold"`.
   - ⚠️ **gyp bakes the compiler command into the ninja graph at `./configure` time** — `CC`/`CXX` must be set *before* configure, and agent shells may not source `~/.zshrc`, so **export them inline** on the configure command.
-- **`@node-core/utils`** (`ncu-ci` + `git-node`): `npm i -g @node-core/utils`; reads `~/.ncurc` for the GitHub token. Plus `gh` (authenticated).
 
-## Building — `scripts/build-node.sh`
+## Building in the devcontainer (default): `scripts/devc.sh`
+
+Build and test inside the official `nodejs/devcontainer:nightly` image through `scripts/devc.sh`. Use the [local build](#local-build-fallback-scriptsbuild-nodesh) only when the user asks, or the engine or image is unavailable.
 
 ```bash
-CC="ccache cc" CXX="ccache c++" ./configure --ninja --experimental-quic --node-builtin-modules-path "$(pwd)"
-ninja -C out/Release node
+scripts/devc.sh build              # configure if needed, then ninja node (background it)
+QUIC=1 scripts/devc.sh build       # only when QUIC is in scope (see below)
+scripts/devc.sh run out/Release/node test/parallel/test-foo.js
+scripts/devc.sh run python3 tools/test.py --mode=release parallel/test-foo
+scripts/devc.sh status             # image age, container, built binary, old volumes
+scripts/devc.sh pull               # newer nightly image, about 10 GB: ask first
 ```
-Run it in the **background**, stream output directly (never pipe through `tail` — it hides progress). Reconfigure after every pull that adds/removes files or changes gyp gating; an incremental `ninja` against a stale graph fails with confusing errors.
+
+- Run it from the checkout (the main clone or a worktree). Each checkout gets its own container.
+- **In the container:** configure, build, tests, lint, and anything that runs `out/Release/node` (a Linux binary). **On the host:** editing, `git`, `gh`, `ncu-ci`.
+- **Don't run `./configure` or `ninja` by hand in the container.** `devc.sh build` matches the image's flags and interpreter, which keeps its prebuilt cache valid. Anything else can rebuild all of V8. `RECONFIGURE=1` forces a configure.
+- **To try a PR, use `repro.sh` in the main clone.** Never `git checkout` an old PR head: one a few weeks behind `main` rebuilds all of V8. If it happens anyway, ask before recreating the `out/` volume (`devc.sh down`, remove the volume `devc.sh status` lists, `devc.sh build`).
+- **A crash may be a `DCHECK` that CI never sees.** The image builds with `--debug-node`, which turns `DCHECK`s on, and CI's Release build compiles them out. Check `main` in the same container before blaming a PR (`repro.sh` does), and say when a finding depends on a `DCHECK`.
+- A new container takes about 4 minutes to set up and build, so reuse the main clone's for reviews. Suggest `devc.sh pull` when `status` shows an image over a week old. A pull doesn't touch existing containers: a checkout moves to the new image after `devc.sh down`, then `build`. Never remove containers or volumes without asking.
+
+## Configure-time feature gating (both build paths)
 
 ⚠️ **Experimental subsystems are gated at CONFIGURE time, not just by a runtime flag.** `configure_quic()`/`configure_dtls()` in `configure.py` set `node_use_quic`/`node_use_dtls`, and without the configure flag the module is **compiled out entirely**:
 - `import 'node:quic'` throws `ERR_UNKNOWN_BUILTIN_MODULE` — with nothing pointing at the build as the cause,
 - `process.features.quic` is `false` and `process.versions.ngtcp2` is empty,
 - every `test-quic-*` test silently **skips** via `hasQuic`, so a green test run proves nothing.
 
-`build-node.sh` passes `--experimental-quic` by default (Ethan is on `@nodejs/quic`) and prints a `features:` line after a successful build so you can see what actually landed in the binary. Toggles: `QUIC=0` to omit it, `DTLS=1` to add `--experimental-dtls` (needed for `src/dtls` / `node:dtls` work, e.g. reviewing PRs that touch the shared `src/crypto` TLS/DTLS/QUIC code). Both flags still need their **runtime** flag too — `node --experimental-quic …`.
+**Set `QUIC=1` only when QUIC is in scope:** a `quic:` PR or task, or changes to `lib/quic.js`, `lib/internal/quic/`, `src/quic/`, `deps/ngtcp2/`, or `test/parallel/test-quic-*`. `devc.sh build`, `repro.sh`, and `build-node.sh` leave it off otherwise. Every build prints a `features:` line so you can see what actually landed in the binary. `DTLS=1` adds `--experimental-dtls` (needed for `src/dtls` / `node:dtls` work, e.g. reviewing PRs that touch the shared `src/crypto` TLS/DTLS/QUIC code). Both flags still need their **runtime** flag too — `node --experimental-quic …`.
+
+**`--node-builtin-modules-path` makes the binary load `lib/*.js` from disk.** Both build paths set it. So after one build:
+- **Editing an existing `lib/*.js`** → no rebuild; just run `out/Release/node`.
+- **Rebuild REQUIRED for:** any C++ change, AND **adding/removing a builtin module file** (e.g. a new `lib/net/promises.js`) — the builtin manifest is generated by `js2c` and compiled in, so a new module isn't `require`-able until you rebuild. Reconfigure first so the new file is picked up. Symptom if you forget: `Cannot find module` / missing from `require('node:module').builtinModules`. `devc.sh build` reconfigures when the `lib/**/*.js` list changes.
+
+## Local build (fallback): `scripts/build-node.sh`
+
+Use only when the user asks for a host build, or the devcontainer is unavailable.
+
+```bash
+CC="ccache cc" CXX="ccache c++" ./configure --ninja --node-builtin-modules-path "$(pwd)"   # add --experimental-quic only for QUIC work
+ninja -C out/Release node
+```
+Run it in the **background**, stream output directly (never pipe through `tail` — it hides progress). Reconfigure after every pull that adds/removes files or changes gyp gating; an incremental `ninja` against a stale graph fails with confusing errors.
 
 ### 💾 Disk hygiene — a build is ~25 GB, and every worktree gets its own
 
@@ -70,7 +103,7 @@ Run it in the **background**, stream output directly (never pipe through `tail` 
 
 **Build Debug only when you actually need C++-level debugging** — chasing a crash or memory bug where debug assertions would fire, or stepping in a debugger — and **delete it when done**:
 ```bash
-CC="ccache cc" CXX="ccache c++" ./configure --ninja --experimental-quic --debug
+CC="ccache cc" CXX="ccache c++" ./configure --ninja --debug   # add --experimental-quic only for QUIC work
 ninja -C out/Debug node
 # ... debug ...
 rm -rf out/Debug
@@ -93,18 +126,16 @@ Measured on a 12-core / 18 GB machine, same build: `-j14` → 28 compilers, 4.9 
 
 Overrides: `JOBS=N` for an explicit count; `NICE=1` additionally wraps ninja in `taskpolicy -b` (macOS background QoS — throttles CPU *and* I/O, maximum interactivity, noticeably slower build).
 
-**`--node-builtin-modules-path` makes the binary load `lib/*.js` from disk.** So after one build:
-- **Editing an existing `lib/*.js`** → no rebuild; just run `out/Release/node`.
-- **Rebuild REQUIRED for:** any C++ change, AND **adding/removing a builtin module file** (e.g. a new `lib/net/promises.js`) — the builtin manifest is generated by `js2c` and compiled in, so a new module isn't `require`-able until you rebuild. Reconfigure first so the new file is picked up. Symptom if you forget: `Cannot find module` / missing from `require('node:module').builtinModules`.
-
 ## Testing
+
+With the devcontainer, prefix each command below with `devc.sh run` (the local fallback runs them as written).
 
 - Run a test: `python3 tools/test.py --mode=release parallel/test-foo` (or a path). Run a single file directly: `out/Release/node test/parallel/test-foo.js`.
 - **Native-addon tests need their addon compiled first** — `out/Release/node test/node-api/foo/test.js` alone fails with `Cannot find module`. Build the matching target:
   - `test/node-api/**` → `make build-node-api-tests`
   - `test/js-native-api/**` → `make build-js-native-api-tests`
   - `test/addons/**` → `make build-addons`
-- **Demonstrate claimed failure modes, don't just trace them** — `scripts/repro.sh <pr> <test-path> [runs]` builds `main` then the PR head, runs the test N times on each, and reports pass/crash/fail (it auto-builds the right addon target for node-api/addons tests). Honestly report a repro that does NOT reproduce — that kills the finding.
+- **Demonstrate claimed failure modes, don't just trace them** — `scripts/repro.sh <pr> <test-path> [runs]` builds `main` then the PR's commits rebased onto `main` (as CI does; `REBASE=0` for the head as-is), runs the test N times on each, and reports pass/crash/fail (it auto-builds the right addon target for node-api/addons tests). Honestly report a repro that does NOT reproduce — that kills the finding.
 - **Lint:** the bundled eslint, NOT `npx` (npx pulls a fresh eslint missing Node's bundled plugins). If `tools/eslint/node_modules` is incomplete (`Cannot find module '@babel/plugin-syntax-import-defer'`), run `npm install` in `tools/eslint` once. Then:
   ```bash
   out/Release/node tools/eslint/node_modules/eslint/bin/eslint.js --config eslint.config.mjs <files>
@@ -145,8 +176,9 @@ Overrides: `JOBS=N` for an explicit count; `NICE=1` additionally wraps ninja in 
 Paths are relative to this skill's directory. The `nodejs-review-queue` skill uses these too.
 
 - `lib.sh` — shared config (`REPO`/`ME`/`MY_TEAMS`) + `gh_retry` (GitHub secondary-rate-limit backoff).
-- `build-node.sh` — ccache reconfigure + `ninja` (run from repo root; background it). Env toggles: `QUIC=0` (default on), `DTLS=1`, `JOBS=N` (default `min(ncpu, RAM_GB/3)`), `NICE=1` (macOS background QoS). Prints the resolved configure args, the chosen `-j`, and a `features:` line on success.
+- `devc.sh <up|build|run|sh|status|pull|down>`: the default build and test environment: the nightly devcontainer, one container per checkout (run from the checkout; background `build`). Env toggles: `QUIC=1` (off by default), `DTLS=1`, `JOBS=N`, `RECONFIGURE=1`, `DEVC_ENGINE`, `DEVC_IMAGE`. See [Building in the devcontainer](#building-in-the-devcontainer-default-scriptsdevcsh).
+- `build-node.sh`: local fallback, ccache reconfigure + `ninja` on the host (run from repo root; background it). Env toggles: `QUIC=1` (off by default), `DTLS=1`, `JOBS=N` (default `min(ncpu, RAM_GB/3)`), `NICE=1` (macOS background QoS). Prints the resolved configure args, the chosen `-j`, and a `features:` line on success.
 - `ci-status.sh <pr>` — authoritative CI via `ncu-ci`, verified against current head.
-- `repro.sh <pr> <test-path> [runs]` — main-vs-PR-head failure/fix demonstration; auto-builds native addons for node-api/addons tests; returns to `main` and cleans up.
+- `repro.sh <pr> <test-path> [runs]` — main-vs-PR failure/fix demonstration with the PR rebased onto main (`REBASE=0` for the head as-is); builds and runs in the devcontainer (`LOCAL=1` for the host); auto-builds native addons for node-api/addons tests; returns to `main` and cleans up.
 
 Run build and CI work through these scripts, one command each. They set the environment themselves, so they work regardless of `~/.zshrc`, and a single command is easier for an agent's permission rules to allow than an env-prefixed or piped one.

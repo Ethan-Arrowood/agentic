@@ -18,7 +18,7 @@ Each directory in [`skills/`](skills/) is a self-contained skill: a `SKILL.md` w
 
 | Skill | What it does |
 |-------|--------------|
-| [`nodejs-contribute`](skills/nodejs-contribute/) | Build, test, commit, and land your own changes in a local [`nodejs/node`](https://github.com/nodejs/node) clone. ccache + RAM-aware `ninja` builds, configure-time feature gating (QUIC/DTLS), native-addon tests, DCO commit trailers, authoritative CI status via `ncu-ci`, and the landing/label policy. Ships the shared `build-node.sh`, `ci-status.sh`, and `repro.sh` tools. |
+| [`nodejs-contribute`](skills/nodejs-contribute/) | Build, test, commit, and land your own changes in a local [`nodejs/node`](https://github.com/nodejs/node) clone. Builds and tests in the official `nodejs/devcontainer` nightly image (local ccache build as fallback), configure-time feature gating (QUIC/DTLS), native-addon tests, DCO commit trailers, authoritative CI status via `ncu-ci`, and the landing/label policy. Ships the shared `devc.sh`, `build-node.sh`, `ci-status.sh`, and `repro.sh` tools. |
 | [`nodejs-review-queue`](skills/nodejs-review-queue/) | Surfaces and triages open `nodejs/node` PRs relevant to your subsystem teams, one at a time. Built around how Node.js actually routes reviews (team @-mentions from `nodejs-github-bot`, not individual assignment). Includes a re-review lane for PRs you already reviewed and a cleanup-sweep mode for stalled PRs. **Read-only:** it never posts to GitHub. **Requires `nodejs-contribute`** for its build/CI/repro tools. |
 
 Both Node.js skills are tuned to my setup: they hardcode my GitHub login, nodejs team memberships, and clone location (`~/dev/nodejs/node`). Adjust those before using them yourself. They work in any agent that reads `SKILL.md` skills. Claude Code permission rules for them are in [`agents/claude/README.md`](agents/claude/README.md#permissions-for-the-nodejs-skills).
@@ -35,7 +35,7 @@ Both Node.js skills are tuned to my setup: they hardcode my GitHub login, nodejs
 | [`agent-files.md`](rules/agent-files.md) | Prefer `AGENTS.md` over agent-specific instruction files, and keep agent setup tool-agnostic. | Agent config work |
 | [`markdown.md`](rules/markdown.md) | Markdown style defaults, links, and what not to add. Defers to a repo's lint config. | Markdown files |
 | [`lang/node.md`](rules/lang/node.md) | Node.js version resolution and use via fnm. | JS/TS code and `package.json` projects |
-| [`orgs/nodejs.md`](rules/orgs/nodejs.md) | `nodejs` org: DCO trailers (built from the per-tool trailer in `git.md`), built binary vs fnm, defer to each repo's docs. | Repos under `~/dev/nodejs/` |
+| [`orgs/nodejs.md`](rules/orgs/nodejs.md) | `nodejs` org: DCO trailers (built from the per-tool trailer in `git.md`), build, test, and run in the `nodejs/devcontainer` image (not on the host or with fnm), defer to each repo's docs. | Repos under `~/dev/nodejs/` |
 
 ### Layout
 

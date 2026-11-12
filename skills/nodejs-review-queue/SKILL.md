@@ -69,12 +69,12 @@ The user only posts findings they can verify and defend themselves. Prefer simpl
 
 ## Session start
 
-The local clone is `~/dev/nodejs/node`. Environment setup, ccache, and building live in the `nodejs-contribute` skill (its *Repo baseline*, *One-time setup*, and *Building* sections). Follow that skill, then:
+The local clone is `~/dev/nodejs/node`. Environment setup and building live in the `nodejs-contribute` skill (its *Repo baseline*, *One-time setup*, and *Building in the devcontainer* sections). Build and run in the devcontainer, not on the host. Follow that skill, then:
 
 1. Run `git status`. If the tree is dirty, stop and ask whether to stash, commit, or keep going.
 2. If on a branch other than `main`, say so and ask before switching.
 3. Otherwise update `main`: `git fetch upstream main && git checkout main && git pull --ff-only upstream main`.
-4. If the pull brought commits, or the tree was never built, start the `nodejs-contribute` skill's `scripts/build-node.sh` in the background before building the queue, so the binary is ready when the user picks a PR to try.
+4. Run the `nodejs-contribute` skill's `scripts/devc.sh status`. If the image is over a week old, ask the user whether to `devc.sh pull` it (about 10 GB). Then start `devc.sh build` in the background before building the queue (with `QUIC=1` only when the session is QUIC work, as `nodejs-contribute` defines it), so the binary is ready when the user picks a PR to try. On an up-to-date tree it's a no-op.
 
 ## GitHub rate limits
 
@@ -96,7 +96,7 @@ Prefer the bundled tools over ad-hoc commands. Paths below are relative to the s
 | 1: team-mention queue | `scripts/build-queue.sh` (background it) | this one |
 | 1b: re-review lane | `scripts/rereview.py [--all]` | this one |
 | 2: CI status | `scripts/ci-status.sh <pr>` | `nodejs-contribute` |
-| 2: local build | `scripts/build-node.sh` (background it) | `nodejs-contribute` |
+| 2: build and run | `scripts/devc.sh build` (background it), `scripts/devc.sh run <cmd>` | `nodejs-contribute` |
 | 2: crash or fix repro | `scripts/repro.sh <pr> <test-path> [runs]` | `nodejs-contribute` |
 
 `nodejs-contribute` is the source of truth for building, testing (including node-api addons), CI mechanics (`request-ci`, `ncu-ci`), and landing (`commit-queue`, squash vs. rebase, "closed = landed"). Reference it rather than restating it.
@@ -156,7 +156,7 @@ Surface process state with the code:
 
 **Read the PR's code, not just the diff or stale local `main`.** Run `git fetch upstream pull/<n>/head:pr-<n>`, then `git show pr-<n>:<path>`. This doesn't touch the working tree and gives PR-accurate line numbers. Delete the `pr-<n>` ref when done.
 
-**For complex PRs (new APIs or events, tricky lifecycle), build and demonstrate claimed failure modes** such as crashes, wire corruption, or double emits. Don't only trace them. Use `nodejs-contribute`'s `scripts/repro.sh <pr> <test-path> [runs]`, which builds `main` and the PR head and runs each N times, or `build-node.sh` plus a manual scenario. Report the observed output, including a repro that did not reproduce (that kills the finding).
+**For complex PRs (new APIs or events, tricky lifecycle), build and demonstrate claimed failure modes** such as crashes, wire corruption, or double emits. Don't only trace them. Use `nodejs-contribute`'s `scripts/repro.sh <pr> <test-path> [runs]` (`QUIC=1` for a QUIC PR), which builds `main` and the PR rebased onto `main` and runs each N times, or `devc.sh build` plus a manual scenario through `devc.sh run`. Report the observed output, including a repro that did not reproduce (that kills the finding).
 
 Give a structured summary in chat:
 

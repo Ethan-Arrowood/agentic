@@ -19,3 +19,32 @@ gh_retry() {
     printf '%s\n' "$err" >&2; rm -f "$out"; return 1
   done
 }
+
+# Where ncu-ci (from @node-core/utils) runs from: "path" if it's on PATH,
+# "fnm" if it's installed under fnm's default Node, or nothing. Agent shells
+# often don't load fnm's shell hook, so a global install under fnm's default
+# Node isn't on their PATH.
+ncu_ci_source() {
+  if command -v ncu-ci >/dev/null 2>&1; then
+    echo path
+  elif command -v fnm >/dev/null 2>&1 &&
+       fnm exec --using=default -- sh -c 'command -v ncu-ci' >/dev/null 2>&1; then
+    echo fnm
+  fi
+}
+
+NCU_INSTALL_HELP='Install @node-core/utils (nodejs-contribute skill, One-time setup):
+  fnm exec --using=default -- npm install --global @node-core/utils
+or, without fnm: npm install --global @node-core/utils
+ncu then needs ~/.ncurc with your GitHub username and a token. The user sets
+those: ncu-config set username <login>, then ncu-config set token <token>.'
+
+# Run ncu-ci, or fail with install steps (exit 127) when it can't be found.
+# Usage: ncu_ci pr <job>
+ncu_ci() {
+  case "$(ncu_ci_source)" in
+    path) ncu-ci "$@" ;;
+    fnm) fnm exec --using=default -- ncu-ci "$@" ;;
+    *) printf 'ncu-ci not found.\n%s\n' "$NCU_INSTALL_HELP" >&2; return 127 ;;
+  esac
+}

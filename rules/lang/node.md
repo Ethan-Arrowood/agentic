@@ -40,12 +40,12 @@ Say which version you picked and why (which file, or the LTS fallback) the first
 
 ## Global CLIs
 
-By default, npm installs global packages into the active fnm version's own directory. A CLI installed under one version (for example `ncu-ci` from `@node-core/utils`) is missing under every other, and each new Node version starts with no globals. My setup shares one global prefix across versions: `prefix=~/.npm-global` in `~/.npmrc`, with `~/.npm-global/bin` on `PATH` after fnm's own `bin`.
+By default, npm installs global packages into the active fnm version's own directory. A CLI installed under one version (for example `ncu-ci` from `@node-core/utils`) is missing under every other, and each new Node version starts with no globals. My setup shares one global prefix across versions: `prefix=~/.npm-global` in `~/.npmrc`, with `~/.npm-global/bin` on `PATH` after fnm's own `bin`. My dotfiles set this up, and install the globals listed in their `Npmfile` (mac-langs layer).
 
 When a global CLI is missing:
 
 - Check `npm prefix -g`. If it isn't `~/.npm-global`, the shared prefix isn't set up on this machine. Tell me instead of installing into the version's directory, where the next upgrade would lose it again.
-- Otherwise, ask before `npm install --global <package>`. It's a download.
+- Otherwise, ask before `npm install --global <package>`. It's a download. For a CLI I'll keep using, suggest adding it to the dotfiles `Npmfile` too, so new machines get it.
 - Don't install `npm` or `corepack` globally. They ship with each Node version, and a shared copy would drift from it.
 - After a major Node upgrade, a global package with a native addon may fail to load. Reinstall it with `npm install --global <package>`.
 

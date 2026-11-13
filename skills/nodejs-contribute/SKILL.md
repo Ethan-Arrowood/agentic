@@ -45,7 +45,9 @@ For **reviewing/triaging other people's** PRs (read-only), use the `nodejs-revie
 
 - **Container engine:** Podman (preferred) or Docker, with a VM large enough to compile (6 CPUs and 12 GiB works).
 - **Devcontainer image:** `scripts/devc.sh pull` (about 10 GB, so ask first).
-- **`@node-core/utils`** (`ncu-ci` + `git-node`) and `gh` on the host, for CI status and landing. Check with `scripts/ci-status.sh --check`. It finds `ncu-ci` on `PATH` or under fnm's default Node, and checks that `~/.ncurc` exists. If `ncu-ci` is missing, offer to install it, and run the install once the user agrees: `fnm exec --using=default -- npm install --global @node-core/utils` (or `npm install --global @node-core/utils` without fnm). If `~/.ncurc` is missing, the user sets it up: `ncu-config set username <login>`, then `ncu-config set token <token>`. Never handle the token yourself.
+- **`@node-core/utils`** (`ncu-ci` + `git-node`) and `gh` on the host, for CI status and landing. Check with `scripts/ci-status.sh --check`. It finds `ncu-ci` on `PATH`, in the shared npm prefix (`~/.npm-global/bin`), or under fnm's default Node. It checks for ncu's config where ncu reads it: `$XDG_CONFIG_HOME/ncurc` when that's set, otherwise `~/.ncurc`.
+  - If `ncu-ci` is missing, offer to install it, and run the install once the user agrees. With my dotfiles installed, that's `dotfiles install` (its mac-langs `Npmfile` lists `@node-core/utils`). Otherwise: `fnm exec --using=default -- npm install --global @node-core/utils`.
+  - If the config is missing, the user sets it up: `dotfiles ncu` with my dotfiles (it opens the GitHub and Jenkins token pages and reads the tokens at a hidden prompt), otherwise `ncu-config set username <login>` and `ncu-config set token <token>`. Never handle the tokens yourself.
 
 Only for the [local fallback build](#local-build-fallback-scriptsbuild-nodesh):
 

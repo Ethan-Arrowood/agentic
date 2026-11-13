@@ -74,7 +74,7 @@ The local clone is `~/dev/nodejs/node`. Environment setup and building live in t
 1. Run `git status`. If the tree is dirty, stop and ask whether to stash, commit, or keep going.
 2. If on a branch other than `main`, say so and ask before switching.
 3. Otherwise update `main`: `git fetch upstream main && git checkout main && git pull --ff-only upstream main`.
-4. Run the `nodejs-contribute` skill's `scripts/ci-status.sh --check`. If it fails, follow that skill's *One-time setup* for `@node-core/utils`: offer to install it, and leave `~/.ncurc` to the user.
+4. Run the `nodejs-contribute` skill's `scripts/ci-status.sh --check`. If it fails, follow that skill's *One-time setup* for `@node-core/utils`: offer to install it, and leave ncu's config and tokens to the user.
 5. Run the `nodejs-contribute` skill's `scripts/devc.sh status`. If the image is over a week old, ask the user whether to `devc.sh pull` it (about 10 GB). Then start `devc.sh build` in the background before building the queue (with `QUIC=1` only when the session is QUIC work, as `nodejs-contribute` defines it), so the binary is ready when the user picks a PR to try. On an up-to-date tree it's a no-op.
 
 ## GitHub rate limits

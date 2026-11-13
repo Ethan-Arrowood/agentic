@@ -45,7 +45,9 @@ For **reviewing/triaging other people's** PRs (read-only), use the `nodejs-revie
 
 - **Container engine:** Podman (preferred) or Docker, with a VM large enough to compile (6 CPUs and 12 GiB works).
 - **Devcontainer image:** `scripts/devc.sh pull` (about 10 GB, so ask first).
-- **`@node-core/utils`** (`ncu-ci` + `git-node`) and `gh` on the host, for CI status and landing: `npm i -g @node-core/utils`. It reads `~/.ncurc` for the GitHub token.
+- **`@node-core/utils`** (`ncu-ci` + `git-node`) and `gh` on the host, for CI status and landing. Check with `scripts/ci-status.sh --check`. It finds `ncu-ci` on `PATH`, in the shared npm prefix (`~/.npm-global/bin`), or under fnm's default Node. It checks for ncu's config where ncu reads it: `$XDG_CONFIG_HOME/ncurc` when that's set, otherwise `~/.ncurc`.
+  - If `ncu-ci` is missing, offer to install it, and run the install once the user agrees. With my dotfiles installed, that's `dotfiles install` (its mac-langs `Npmfile` lists `@node-core/utils`). Otherwise: `fnm exec --using=default -- npm install --global @node-core/utils`.
+  - If the config is missing, the user sets it up: `dotfiles ncu` with my dotfiles (it opens the GitHub and Jenkins token pages and reads the tokens at a hidden prompt), otherwise `ncu-config set username <login>` and `ncu-config set token <token>`. Never handle the tokens yourself.
 
 Only for the [local fallback build](#local-build-fallback-scriptsbuild-nodesh):
 
@@ -150,7 +152,7 @@ With the devcontainer, prefix each command below with `devc.sh run` (the local f
 
 ## CI on your PR — `scripts/ci-status.sh <pr>`
 
-- **Never conclude CI status from `gh pr checks`** — it mixes stale check-runs from different Jenkins runs. The gate is Jenkins `node-test-pull-request`. `ci-status.sh <pr>` runs `ncu-ci` and verifies the result is against the **current head** (SUCCESS/FAILURE/PENDING + HEAD-MATCH/STALE; NO-RUN → recommend `request-ci`).
+- **Never conclude CI status from `gh pr checks`** — it mixes stale check-runs from different Jenkins runs. The gate is Jenkins `node-test-pull-request`. `ci-status.sh <pr>` runs `ncu-ci` and verifies the result is against the **current head** (SUCCESS/FAILURE/PENDING + HEAD-MATCH/STALE; NO-RUN → recommend `request-ci`). `CI=UNKNOWN` means `ncu-ci` itself failed or is missing, not that CI did; run `ci-status.sh --check`.
 - Classify a real FAILURE: is it in the PR's own subsystem, or unrelated infra/flake? Rebase `BUILD_FAILURE` ("could not apply …"), `test-repl-user-error-handler`, `test-internet` ENODATA on a net/dns PR, etc. are usually not the diff.
 - **`test-internet`** is a path-filtered (`lib/net.js`/`lib/dns.js`/`internal/dns/**`/`test/internet/**`), real-world-network workflow, frequently red from live-DNS drift, and is **not** the commit-queue gate.
 - **`request-ci` triggers CI; it does not run on its own.** `auto-start-ci.yml` (every 5 min) picks up `request-ci`-labeled + approved PRs, starts Jenkins, and **removes the label** (one-shot, consumed). The Jenkins job rebases onto `origin/main` (`REBASE_ONTO`) before building — so a fresh run tests against current main **without a manual rebase**; only rebase manually when `mergeable: CONFLICTING`.
@@ -178,7 +180,7 @@ Paths are relative to this skill's directory. The `nodejs-review-queue` skill us
 - `lib.sh` — shared config (`REPO`/`ME`/`MY_TEAMS`) + `gh_retry` (GitHub secondary-rate-limit backoff).
 - `devc.sh <up|build|run|sh|status|pull|down>`: the default build and test environment: the nightly devcontainer, one container per checkout (run from the checkout; background `build`). Env toggles: `QUIC=1` (off by default), `DTLS=1`, `JOBS=N`, `RECONFIGURE=1`, `DEVC_ENGINE`, `DEVC_IMAGE`. See [Building in the devcontainer](#building-in-the-devcontainer-default-scriptsdevcsh).
 - `build-node.sh`: local fallback, ccache reconfigure + `ninja` on the host (run from repo root; background it). Env toggles: `QUIC=1` (off by default), `DTLS=1`, `JOBS=N` (default `min(ncpu, RAM_GB/3)`), `NICE=1` (macOS background QoS). Prints the resolved configure args, the chosen `-j`, and a `features:` line on success.
-- `ci-status.sh <pr>` — authoritative CI via `ncu-ci`, verified against current head.
+- `ci-status.sh <pr>` — authoritative CI via `ncu-ci`, verified against current head. `--check` verifies `ncu-ci` and `~/.ncurc` are set up.
 - `repro.sh <pr> <test-path> [runs]` — main-vs-PR failure/fix demonstration with the PR rebased onto main (`REBASE=0` for the head as-is); builds and runs in the devcontainer (`LOCAL=1` for the host); auto-builds native addons for node-api/addons tests; returns to `main` and cleans up.
 
 Run build and CI work through these scripts, one command each. They set the environment themselves, so they work regardless of `~/.zshrc`, and a single command is easier for an agent's permission rules to allow than an env-prefixed or piped one.

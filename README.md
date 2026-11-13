@@ -34,7 +34,7 @@ Both Node.js skills are tuned to my setup: they hardcode my GitHub login, nodejs
 | [`writing.md`](rules/writing.md) | Prose style for anything written: project style guide first, then brevity, no filler, short sentences, no em dashes, sparing semicolons, correctness. | Every session |
 | [`agent-files.md`](rules/agent-files.md) | Prefer `AGENTS.md` over agent-specific instruction files, and keep agent setup tool-agnostic. | Agent config work |
 | [`markdown.md`](rules/markdown.md) | Markdown style defaults, links, and what not to add. Defers to a repo's lint config. | Markdown files |
-| [`lang/node.md`](rules/lang/node.md) | Node.js version resolution and use via fnm. | JS/TS code and `package.json` projects |
+| [`lang/node.md`](rules/lang/node.md) | Node.js version resolution and use via fnm, and keeping global CLIs across Node versions. | JS/TS code and `package.json` projects |
 | [`orgs/nodejs.md`](rules/orgs/nodejs.md) | `nodejs` org: DCO trailers (built from the per-tool trailer in `git.md`), build, test, and run in the `nodejs/devcontainer` image (not on the host or with fnm), defer to each repo's docs. | Repos under `~/dev/nodejs/` |
 
 ### Layout

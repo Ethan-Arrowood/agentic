@@ -21,9 +21,11 @@ gh_retry() {
 }
 
 # Where ncu-ci (from @node-core/utils) runs from: "path" if it's on PATH,
-# "fnm" if it's installed under fnm's default Node, or nothing. Agent shells
-# often don't load fnm's shell hook, so a global install under fnm's default
-# Node isn't on their PATH.
+# "fnm" if it's installed under fnm's default Node, or nothing. The fnm
+# fallback covers shells that don't load fnm's hook (usually set up in
+# ~/.zshrc), where fnm's Node isn't on PATH. npm installs globals per Node
+# version unless a shared prefix is set (see rules/lang/node.md), so ncu-ci
+# can also be missing after a Node upgrade.
 ncu_ci_source() {
   if command -v ncu-ci >/dev/null 2>&1; then
     echo path

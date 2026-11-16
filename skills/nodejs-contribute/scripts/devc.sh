@@ -129,13 +129,18 @@ setup() {
   #
   # Use the image's /usr/bin/git: git-restore-mtime is in its exec path
   # (/usr/lib/git-core), not in the Nix git that direnv puts first on PATH.
+  #
+  # Turn off rename detection. It compares file contents, so in a partial
+  # (--filter=blob:none) clone git fetches missing blobs from the promisor
+  # remote. The container has no ssh, so each fetch fails and the step stalls.
+  # Without it, git compares trees only.
   if ! "$ENGINE" exec "$name" test -e "$MTIMES"; then
     git -C "$root" cat-file -e "$commit^{commit}" 2>/dev/null ||
       git -C "$root" fetch -q upstream main
     echo "devc: restoring mtimes (about 90 s)" >&2
     "$ENGINE" exec -w "$WS" "$name" bash -c "
       set -eo pipefail
-      /usr/bin/git restore-mtime --quiet
+      /usr/bin/git -c diff.renames=false restore-mtime --quiet
       /usr/bin/git diff --no-renames --name-only -z $commit HEAD | xargs -0r touch -c
       touch $MTIMES"
   fi

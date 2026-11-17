@@ -3,6 +3,8 @@
 # Builds main, runs the test N times; builds the PR, runs it N times;
 # reports pass/crash/fail for each so a crash (or its fix) is demonstrated,
 # not just traced. Needs a clean tree. Returns the tree to main.
+# In a linked worktree, main is usually checked out in the main clone, so the
+# baseline is a detached checkout of main's commit instead.
 # Usage: repro.sh <pr> <test-path> [runs]        (run from the node repo root)
 #   e.g. repro.sh 64623 test/parallel/test-http2-respond-with-file-connection-abort.js 25
 #
@@ -68,8 +70,15 @@ runN()  { local pass=0 crash=0 fail=0 rc shown=0 flags
 git diff --quiet && git diff --cached --quiet ||
   { echo "repro.sh: the working tree has uncommitted changes; commit or stash them first" >&2; exit 1; }
 
+# git refuses to check out a branch that another worktree has checked out.
+if [ "$(git rev-parse --path-format=absolute --git-dir)" = "$(git rev-parse --path-format=absolute --git-common-dir)" ]; then
+  to_main() { git checkout main; }
+else
+  to_main() { git checkout --detach main; }
+fi
+
 echo "== baseline: main =="
-git checkout main >/dev/null 2>&1 || { echo "repro.sh: could not check out main" >&2; exit 1; }
+to_main >/dev/null 2>&1 || { echo "repro.sh: could not check out main" >&2; exit 1; }
 build || exit 1
 echo "  main $(git rev-parse --short HEAD): $(runN)"
 
@@ -78,7 +87,7 @@ echo "== PR #$n =="
 # have is never moved or deleted. The only branch this creates is repro-<n>,
 # and it refuses to touch one that already exists.
 made_branch=0
-cleanup() { git checkout main >/dev/null 2>&1; [ $made_branch = 1 ] && git branch -D "repro-$n" >/dev/null 2>&1; }
+cleanup() { to_main >/dev/null 2>&1; [ $made_branch = 1 ] && git branch -D "repro-$n" >/dev/null 2>&1; }
 git fetch upstream "pull/$n/head" >/dev/null 2>&1 || { echo "  fetch of pull/$n/head failed" >&2; exit 1; }
 head=$(git rev-parse FETCH_HEAD)
 if [ "${REBASE:-1}" = "1" ]; then

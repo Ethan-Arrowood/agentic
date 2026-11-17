@@ -171,7 +171,51 @@ With the devcontainer, prefix each command below with `devc.sh run` (the local f
 
 - No `semver-patch` label exists — **patch is the unlabeled default.** `semver-major` (breaking / silent→throw behavior change), `semver-minor` (new public API). `notable-change` for CHANGELOG-worthy.
 - **Experimental surface** (Stability 1) → behavior changes are fine as **patch**, no `semver-major` (e.g. experimental quic/zlib-Zstd/iterable-streams).
-- Add backport labels for changes to APIs already shipped in an LTS/current line.
+- For which release lines a change reaches, see [Release-line labels](#release-line-labels).
+
+### `author ready`
+
+The *Author ready pull requests* section and the label list in `collaborator-guide.md` each give part of the definition. Require all of these:
+
+- A CI run is in progress or completed.
+- At least one collaborator approval. A `semver-major` PR needs two TSC approvals.
+- No outstanding review comments.
+- No conflicts with the base branch.
+
+The label tells collaborators the author is done and the PR needs someone to land it. It puts the PR in the [PR action queue](https://github.com/nodejs/node/issues/views/15196) triage view, which lists `author ready` and `review wanted` PRs not yet in the commit queue.
+
+- Recommend adding it when all four hold. When approving a PR that qualifies, add it in the same pass, plus `request-ci` if no Jenkins run has started.
+- Recommend removing it once one stops holding, such as failed CI or a new unresolved review comment. `author-ready-conflicts.yml` removes it daily from PRs that conflict with their base, and posts a comment asking for a rebase and a fresh approval.
+- On your own PR, add it when the PR qualifies but can't land yet, such as during the 48-hour wait.
+- It isn't a landing gate. `commit-queue.yml` doesn't check it, so a PR can land without it. Adding it after `commit-queue` is harmless.
+
+### Release-line labels
+
+A change on `main` reaches a release line when a releaser cherry-picks it onto `vN.x-staging`. Releasers list candidates with `branch-diff`, which skips `semver-major` PRs and PRs labeled `dont-land-on-vN.x`, `backport-requested-vN.x`, `backport-blocked-vN.x`, `backport-open-vN.x`, or `backported-to-vN.x` (`doc/contributing/releases.md`). LTS lines also skip `baking-for-lts`. A reviewer keeps a change off a line by adding `dont-land-on-vN.x` before a releaser picks it up.
+
+**Active lines** are those in the Release WG schedule that have started and not reached `end`:
+
+```bash
+gh api repos/nodejs/Release/contents/schedule.json --jq .content | base64 -d | jq -r --arg t "$(date +%F)" 'to_entries[] | select(.value.start <= $t and .value.end >= $t) | .key'
+```
+
+On 2026-11-17 that printed v22, v24, and v26. The staging branch for the next major (`v27.x-staging` then) takes `semver-major` changes, so a `dont-land-on` label for it is rare.
+
+**Recommend `dont-land-on-vN.x`** for each active line the change doesn't apply to:
+
+- It changes files that don't exist on the line. Check with `git ls-tree upstream/vN.x-staging -- <path>`, which prints nothing for a missing path. Example: [#67529](https://github.com/nodejs/node/pull/67529) adds `lib/internal/http/*.js` to a lint rule, and that directory existed only on `main` and `v27.x-staging`. It got `dont-land-on-v22.x`, `-v24.x`, and `-v26.x`.
+- It depends on something the line lacks: a `semver-major` change, a newer V8 or JavaScript feature ([#67451](https://github.com/nodejs/node/pull/67451) uses `Map.prototype.getOrInsert()`), or a toolchain bump ([#65742](https://github.com/nodejs/node/pull/65742) bumps rustc in CI).
+- It reverts a change that never shipped on the line. Label both the revert and the original PR, and remove their `semver-*` and `notable-change` labels, unless the original was already backported (`collaborator-guide.md`, *Reverting commits*).
+- It's provisional work that shouldn't ship yet (`doc/contributing/large-pull-requests.md`).
+- Backporting it costs more than it's worth (`collaborator-guide.md`, *LTS/version labels*).
+
+**Don't recommend it:**
+
+- On a `semver-major` PR. `branch-diff` already skips those for existing lines.
+- For a line the change applies to. A fix in code that exists on the line should reach it by default. If unsure, leave the label off and let the releaser decide.
+- Because a cherry-pick might conflict. The releaser handles that with `backport-requested-vN.x`.
+
+**Leave to releasers:** `backport-requested-vN.x`, `backport-open-vN.x`, `backported-to-vN.x`, `land-on-vN.x`, and `baking-for-lts`. Any collaborator may add `lts-watch-vN.x` to flag a PR the Release WG should consider for an LTS line, such as a bug fix in code that line ships.
 
 ## Bundled tools (`scripts/`)
 

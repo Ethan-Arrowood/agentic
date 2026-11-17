@@ -166,13 +166,13 @@ Give a structured summary in chat:
 - **Findings:** tagged 🔴 blocker, 🟠 should fix, 🟡 nit, or 🟢 note, with `file:line` links. Weight correctness, behavior and ABI regressions, semver implications, and test coverage.
 - **Missing classification labels:** always check. Flagging a missing label is a real review contribution.
   - `semver-major` (breaking change, including silent behavior becoming a throw), `semver-minor` (new public API), `notable-change` (CHANGELOG-worthy).
-  - Backport labels for changes to APIs already in an LTS or Current line.
+  - `dont-land-on-vN.x` for each active release line the change doesn't apply to, such as one that lacks the changed files. `lts-watch-vN.x` for a fix an LTS line should consider. Follow `nodejs-contribute`'s *Release-line labels*, which has the active-line check and when not to add them.
   - `fast-track` for doc-only or test-only PRs.
   - The bot applies subsystem labels (`net`, `http`, …), so don't flag those.
 - **Recommended actions:** name the specific workflow label or next step for the PR's state. The user applies it.
   - **No CI run** (no `node-test-pull-request` job, `needs-ci` present, `ncu-ci` finds no run): recommend adding `request-ci`.
   - **Stale or out-of-date CI:** if `mergeable: MERGEABLE`, recommend adding `request-ci`. The CI job rebases onto `main` itself (`REBASE_ONTO`), so don't ask the author to rebase. Only if `mergeable: CONFLICTING`, or CI shows a rebase `BUILD_FAILURE`, recommend asking the author to rebase.
-  - **At least 1 approval, a CI run, no outstanding comments:** recommend adding `author ready`, and removing it if that stops being true.
+  - **A CI run, at least 1 approval (2 TSC for `semver-major`), no outstanding comments, no conflicts:** recommend adding `author ready`, and removing it if that stops being true. See `nodejs-contribute`'s *`author ready`*.
   - **Doc-only, test-only, or a clean regression fix:** recommend `fast-track`. It needs two 👍 on the bot's fast-track comment, plus approvals and green CI.
   - **All gates met (approvals, wait time, CI):** note it's land-ready via `commit-queue`. Ignore a `BLOCKED` merge button or "commits must have verified signatures". That's a GitHub ruleset gate Node.js doesn't use for landing, not a `commit-queue` gate.
   - **Abandoned or parked by the author:** use the [author association split](#c3-split-by-author-association).
@@ -183,7 +183,7 @@ Give a structured summary in chat:
 From `doc/contributing/collaborator-guide.md`. Full CI and landing mechanics are in `nodejs-contribute`.
 
 - **Approvals:** two non-author collaborators, or one once the PR has been open over 7 days. Wait 48 hours (72 over a weekend).
-- **`author ready`:** at least 1 approval, a CI run, and no outstanding comments.
+- **`author ready`:** a CI run, at least 1 approval (2 TSC for `semver-major`), no outstanding comments, and no conflicts. It's a triage signal, not a landing gate.
 - **`fast-track`:** doc-only, test-only, or a clean regression fix. Two 👍 on the bot comment, plus approvals and green CI.
 - **CI action:** run `ci-status.sh <pr>`. No run, or stale on a `MERGEABLE` PR, means recommend `request-ci`. A real failure in the PR's subsystem is a finding. An unrelated flake or infra failure gets a note.
 

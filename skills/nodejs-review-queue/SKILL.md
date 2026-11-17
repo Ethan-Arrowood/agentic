@@ -84,7 +84,7 @@ Bursts of `gh` calls trip GitHub's **secondary rate limit** (HTTP 403 "You have 
 - It isn't the hourly quota. `gh api rate_limit` shows `search` and `core` almost untouched, so don't diagnose it there or poll it waiting for a reset.
 - `search/*` is the most sensitive endpoint, with a 30/minute primary cap as well. Keep every `gh` loop serial. Never fan calls out concurrently or across parallel agents.
 - Once tripped, the cooldown lasts minutes, and calls during the cooldown extend it.
-- Use `gh_retry` from [scripts/lib.sh](scripts/lib.sh) for any loop, with `sleep 10` between search calls. It backs off 1 to 5 minutes and retries the same call. The bundled scripts already do this.
+- Use `gh_retry` from [scripts/lib.sh](scripts/lib.sh) for any loop, with `sleep 30` between search calls. `in:comments` searches tripped the limit about every other call at 10-second spacing. `gh_retry` backs off 1 to 5 minutes and retries the same call. The bundled scripts already do this, paging searches one page at a time (`SEARCH_SLEEP`, default 30).
 
 If a session's first burst already tripped the limit, run the loop in the background so the waits don't block the chat.
 

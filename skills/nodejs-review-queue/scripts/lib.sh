@@ -21,10 +21,19 @@ gh_retry() {
 }
 
 # All open, non-draft PR numbers (not authored by $ME) matching a search
-# qualifier string. Paginates past the search API's default 30 results.
+# qualifier string. Fetches one page of 100 at a time with a pause between
+# pages. `gh api --paginate` fetches pages back to back, so a large result set
+# (`@nodejs/http` has 400+) trips the secondary rate limit, and gh_retry then
+# restarts the whole search. The search API returns at most 10 pages.
 # Usage: search_prs 'in:comments "@nodejs/net"'
 search_prs() {
-  gh_retry gh api -X GET search/issues --paginate \
-    -f q="repo:$REPO is:pr is:open draft:false -author:$ME $1" \
-    -f per_page=100 --jq '.items[].number'
+  local page=1 out
+  while :; do
+    out=$(gh_retry gh api -X GET search/issues \
+      -f q="repo:$REPO is:pr is:open draft:false -author:$ME $1" \
+      -f per_page=100 -f page=$page --jq '.items[].number') || return 1
+    [ -n "$out" ] && print -r -- "$out"
+    (( ${#${(f)out}} < 100 || page >= 10 )) && return 0
+    page=$((page+1)); sleep "${SEARCH_SLEEP:-30}"
+  done
 }

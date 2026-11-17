@@ -20,7 +20,7 @@ for t in "${MY_TEAMS[@]}"; do
   else
     failed+=("search:$t")
   fi
-  sleep 10   # search/* is the most secondary-limit-sensitive endpoint
+  sleep "${SEARCH_SLEEP:-30}"   # search/* is the most secondary-limit-sensitive endpoint
 done
 candidates=(${(un)candidates})
 echo "== ${#candidates} candidates; confirming bot review requests ==" >&2

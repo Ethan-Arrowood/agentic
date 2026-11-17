@@ -166,7 +166,7 @@ Give a structured summary in chat:
 - **Findings:** tagged 🔴 blocker, 🟠 should fix, 🟡 nit, or 🟢 note, with `file:line` links. Weight correctness, behavior and ABI regressions, semver implications, and test coverage.
 - **Missing classification labels:** always check. Flagging a missing label is a real review contribution.
   - `semver-major` (breaking change, including silent behavior becoming a throw), `semver-minor` (new public API), `notable-change` (CHANGELOG-worthy).
-  - `dont-land-on-vN.x` for each active release line the change doesn't apply to, such as one that lacks the changed files. `lts-watch-vN.x` for a fix an LTS line should consider. Follow `nodejs-contribute`'s *Release-line labels*, which has the active-line check and when not to add them.
+  - `dont-land-on-vN.x` only when the change would cherry-pick cleanly onto an active release line it shouldn't reach, and precedent for the subsystem doesn't already keep it off. Most PRs need none, and releasers add these labels themselves. `lts-watch-vN.x` for a fix an LTS line should consider. Follow `nodejs-contribute`'s *Release-line labels*, which has the precedent, cherry-pick, and active-line checks.
   - `fast-track` for doc-only or test-only PRs.
   - The bot applies subsystem labels (`net`, `http`, …), so don't flag those.
 - **Recommended actions:** name the specific workflow label or next step for the PR's state. The user applies it.

@@ -99,8 +99,6 @@ Other cases:
 - Commit messages use trailers instead of a footer (see the Git rules).
 - No footer in release or publish text, such as GitHub Release notes or changelogs.
 
-## PR header image
+## Generated images
 
-- Style: none
-
-Don't add generated images, such as PR header images, to anything posted under my identity. Never send my photo, avatar, or likeness to an image model. The section above is the per-author setting that Harper's PR conventions read: `Style: none` turns their header image off, and the PR body states the `style-none` skip instead.
+Don't add generated images, such as PR header images, to anything posted under my identity. Never send my photo, avatar, or likeness to an image model.

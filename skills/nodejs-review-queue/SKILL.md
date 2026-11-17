@@ -96,6 +96,7 @@ Prefer the bundled tools over ad-hoc commands. Paths below are relative to the s
 |------|------|----------|
 | 1: team-mention queue | `scripts/build-queue.sh` (background it) | this one |
 | 1b: re-review lane | `scripts/rereview.py [--all]` | this one |
+| 2: PR discussion | `scripts/discussion.sh <pr>` | this one |
 | 2: CI status | `scripts/ci-status.sh <pr>` | `nodejs-contribute` |
 | 2: build and run | `scripts/devc.sh build` (background it), `scripts/devc.sh run <cmd>` | `nodejs-contribute` |
 | 2: crash or fix repro | `scripts/repro.sh <pr> <test-path> [runs]` | `nodejs-contribute` |
@@ -138,14 +139,14 @@ gh pr diff <n> --repo nodejs/node
 
 **CI status:** never conclude it from `gh pr checks`. GitHub's check list mixes stale nodes with the current Jenkins run and has caused a wrong "CI failing" call. Use `nodejs-contribute`'s `scripts/ci-status.sh <pr>`, which runs `ncu-ci` against the current head.
 
-**Read the existing discussion first.** Node.js PRs are heavily commented, and collaborators, the author, and bots have often raised and resolved what you'd flag. Watch for CI bot comments, `@nodejs/tsc` or collaborator objections, semver-major concerns, and blocking change requests. Pull all three streams:
+**Read the existing discussion first.** Node.js PRs are heavily commented, and collaborators, the author, and bots have often raised and resolved what you'd flag. Watch for CI bot comments, `@nodejs/tsc` or collaborator objections, semver-major concerns, and blocking change requests. Pull reviews, PR comments, and inline threads with `scripts/discussion.sh <pr>`.
 
-```bash
-gh pr view <n> --repo nodejs/node --json reviews,comments \
-  --jq '{reviews: [.reviews[]|{author:.author.login, state:.state, body:.body}], pr_comments: [.comments[]|{author:.author.login, body:.body}]}'
-gh api --paginate "repos/nodejs/node/pulls/<n>/comments" \
-  --jq '.[] | {author:.user.login, path:.path, line:.line, body:.body}'
-```
+It reads through GraphQL, because only GraphQL exposes `isMinimized` and `minimizedReason`. `gh pr view --json reviews,comments` and the REST endpoints omit them, so content a moderator hid looks legitimate there. The script:
+
+- Drops content hidden as spam, abuse, low-quality, or off-topic, and anything by a user the nodejs org blocked (checked with `orgs/nodejs/blocks/<login>`, which needs the user's moderation rights). It prints a count of what it dropped.
+- Marks content hidden as outdated, duplicate, or resolved, and resolved or outdated inline threads.
+
+Don't credit dropped content or treat its points as already raised. A point it made can still be a finding, but only on its own verified evidence.
 
 Don't re-raise a point already made or resolved. Verify such claims, credit them, and move on. Note existing review states and blocking objections. Flag open threads in the user's subsystems so they can weigh in.
 

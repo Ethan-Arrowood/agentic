@@ -191,7 +191,7 @@ The label tells collaborators the author is done and the PR needs someone to lan
 
 ### Release-line labels
 
-A change on `main` reaches a release line when a releaser cherry-picks it onto `vN.x-staging`. Releasers list candidates with `branch-diff`, which skips `semver-major` PRs and PRs labeled `dont-land-on-vN.x`, `backport-requested-vN.x`, `backport-blocked-vN.x`, `backport-open-vN.x`, or `backported-to-vN.x` (`doc/contributing/releases.md`). LTS lines also skip `baking-for-lts`. A reviewer keeps a change off a line by adding `dont-land-on-vN.x` before a releaser picks it up.
+A change on `main` reaches a release line when a releaser cherry-picks it onto `vN.x-staging`. Releasers list candidates with `branch-diff`, which skips `semver-major` PRs and PRs labeled `dont-land-on-vN.x`, `backport-requested-vN.x`, `backport-blocked-vN.x`, `backport-open-vN.x`, or `backported-to-vN.x` (`doc/contributing/releases.md`). LTS lines also skip `baking-for-lts`. Releasers add `dont-land-on-vN.x` themselves, often days after a PR lands, when a change doesn't fit a line. A reviewer's label matters most when a cherry-pick would apply cleanly but the change shouldn't ship on that line.
 
 **Active lines** are those in the Release WG schedule that have started and not reached `end`:
 
@@ -201,9 +201,20 @@ gh api repos/nodejs/Release/contents/schedule.json --jq .content | base64 -d | j
 
 On 2026-11-17 that printed v22, v24, and v26. The staging branch for the next major (`v27.x-staging` then) takes `semver-major` changes, so a `dont-land-on` label for it is rare.
 
+**Check precedent first.** See how recent PRs in the same subsystem were labeled, and whether that subsystem's commits reach each staging branch:
+
+```bash
+gh pr list --repo nodejs/node --state closed --label <subsystem> --limit 80 --json number,labels --jq '[.[] | select(any(.labels[]; .name | startswith("dont-land")))] | length'
+git log --oneline --since=<six months ago> upstream/vN.x-staging --grep='^<subsystem>' | wc -l
+```
+
+Experimental doesn't mean main-only. On 2026-11-17, 76 of the last 80 closed `quic` PRs had no release-line label. Since June, 82 quic commits had landed on `v24.x-staging` and 54 on `v26.x-staging`, while `v22.x-staging` had none since January 2025. So quic changes reach v24 and v26 by default, and releasers skip v22 without a label.
+
+**Test the cherry-pick.** For a single-commit PR, `git merge-tree --write-tree --merge-base=<commit>^ upstream/vN.x-staging <commit>` exits 0 when the commit applies cleanly to that line. A clean result on a line the change shouldn't reach is the main case for a reviewer's label.
+
 **Recommend `dont-land-on-vN.x`** for each active line the change doesn't apply to:
 
-- It changes files that don't exist on the line. Check with `git ls-tree upstream/vN.x-staging -- <path>`, which prints nothing for a missing path. Example: [#67529](https://github.com/nodejs/node/pull/67529) adds `lib/internal/http/*.js` to a lint rule, and that directory existed only on `main` and `v27.x-staging`. It got `dont-land-on-v22.x`, `-v24.x`, and `-v26.x`.
+- It targets files or code that don't exist on the line, and the cherry-pick would still apply. Check paths with `git ls-tree upstream/vN.x-staging -- <path>`, which prints nothing for a missing path. Example: [#67529](https://github.com/nodejs/node/pull/67529) adds a `lib/internal/http/*.js` glob to a lint rule. That directory existed only on `main` and `v27.x-staging`, but the config file exists everywhere, so the commit applied cleanly to v22, v24, and v26. It got `dont-land-on-v22.x`, `-v24.x`, and `-v26.x`.
 - It depends on something the line lacks: a `semver-major` change, a newer V8 or JavaScript feature ([#67451](https://github.com/nodejs/node/pull/67451) uses `Map.prototype.getOrInsert()`), or a toolchain bump ([#65742](https://github.com/nodejs/node/pull/65742) bumps rustc in CI).
 - It reverts a change that never shipped on the line. Label both the revert and the original PR, and remove their `semver-*` and `notable-change` labels, unless the original was already backported (`collaborator-guide.md`, *Reverting commits*).
 - It's provisional work that shouldn't ship yet (`doc/contributing/large-pull-requests.md`).
@@ -213,6 +224,8 @@ On 2026-11-17 that printed v22, v24, and v26. The staging branch for the next ma
 
 - On a `semver-major` PR. `branch-diff` already skips those for existing lines.
 - For a line the change applies to. A fix in code that exists on the line should reach it by default. If unsure, leave the label off and let the releaser decide.
+- When precedent shows the line never takes the subsystem. Example: [#67531](https://github.com/nodejs/node/pull/67531) changes `src/quic/session.cc`, which exists on v22, but `node:quic` isn't public there and releasers skip quic on v22 without a label.
+- When the code moved but still exists on the line. Example: [#67395](https://github.com/nodejs/node/pull/67395) changes `lib/internal/http/`, and the same code lives in `lib/_http_*.js` on v22, v24, and v26. The change applies there, and adapting the paths is the releaser's backport.
 - Because a cherry-pick might conflict. The releaser handles that with `backport-requested-vN.x`.
 
 **Leave to releasers:** `backport-requested-vN.x`, `backport-open-vN.x`, `backported-to-vN.x`, `land-on-vN.x`, and `baking-for-lts`. Any collaborator may add `lts-watch-vN.x` to flag a PR the Release WG should consider for an LTS line, such as a bug fix in code that line ships.

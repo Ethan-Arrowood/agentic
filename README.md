@@ -12,6 +12,14 @@ Agentic skills, rules, and hooks for my ([@Ethan-Arrowood](https://github.com/Et
 >
 > I'm not perfect, and these tools are evolving so rapidly. Sometimes I may make a mistake. I try really hard to configure my agentic tools appropriately. If you ever see something that doesn't seem right, please bring it to my attention. GitHub notifications are particularly swamped these days. I recommend emailing me at ethan@arrowood.dev or DM'ing me on [LinkedIn](https://www.linkedin.com/in/ethan-arrowood/) or [Bluesky](https://bsky.app/profile/arrowood.dev).
 
+### Human Voice footer
+
+The footer I put at the end of GitHub PRs, issues, and comments written in my own words. Update the model name to the one that helped. Other platforms and the exception footer are in the [Posting rules](rules/posting.md#footer).
+
+```md
+<sub>AI-assisted (Claude Opus 5.5, [my setup](https://github.com/Ethan-Arrowood/agentic)). The words are my own, per the [Human Voice](https://ai-policy.dev/policies/human-voice/1.0.0) policy.</sub>
+```
+
 ## Skills
 
 Each directory in [`skills/`](skills/) is a self-contained skill: a `SKILL.md` with YAML frontmatter, plus any supporting files (usually a `scripts/` toolkit with its own README).

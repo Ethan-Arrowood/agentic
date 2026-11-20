@@ -654,5 +654,133 @@ class BankTest(unittest.TestCase):
         self.assertIn("o=someorg", q)
         self.assertIn("r=somerepo", q)
 
+    def reviewed_node(self, n, head, others=(), created=None, labels=()):
+        """A sync node with reviews by others (login, minutes ago) and an open time."""
+        node = pr_node(n, head, labels=labels)
+        node["createdAt"] = created or ago(days=10)
+        node["allReviews"] = {"nodes": [{"author": {"login": who}, "submittedAt": ago(minutes=m)} for who, m in others]}
+        return node
+
+    def test_hold_keeps_a_candidate_with_no_entry_out_of_the_plan(self):
+        self.cache("rereview.tsv", self.rereview_row(5))
+        self.cache("ci.json", json.dumps({"5": {"head": A[:12], "ok": True, "line": "CI=SUCCESS HEAD-MATCH", "at": ago(minutes=1)}}))
+        self.assertIn("PREPARE 5 lane=cq", self.run_bank("plan").stdout)
+        self.run_bank("hold", "5", "--until-reviews", "2", "more", "http", "reviews")
+        e = self.entry(5)
+        self.assertEqual(e["state"], "waiting")
+        self.assertEqual(e["lane"], "cq")
+        self.assertEqual(e["note"], "held: more http reviews")
+        self.assertEqual(e["wait_for"], f"reviews=2,push={A[:12]}")
+        out = self.run_bank("plan", "--all").stdout
+        self.assertNotIn("PREPARE 5", out)
+        self.assertRegex(out, r"WAIT 5 lane=cq since .*2 review\(s\) by others")
+
+    def test_hold_refuses_a_pr_the_bank_does_not_know(self):
+        p = self.run_bank("hold", "5", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertFalse((self.bank / "prs" / "5.md").exists())
+
+    def test_reviews_by_others_wake_a_hold_and_the_pr_is_planned_again(self):
+        # Skipped in the cq lane at this head, then held: the wake brings it back.
+        self.write_entry(5, state="done", lane="cq", acted_head=A, disposition="skipped",
+                         disposition_at=ago(hours=2))
+        self.run_bank("hold", "5", "--until-reviews", "2")
+        since = self.entry(5)["wait_since"]
+        self.rules([self.sync_rule(self.reviewed_node(5, A, others=[("http-a", -1), ("me", -1), ("someone", -1)]))])
+        self.run_bank("sync")
+        self.assertEqual(self.entry(5)["state"], "waiting", "me and the author don't count")
+        self.rules([self.sync_rule(self.reviewed_node(5, A, others=[("http-a", -1), ("http-b", -1), ("old", 600)]))])
+        self.run_bank("sync")
+        e = self.entry(5)
+        self.assertEqual(e["state"], "done")
+        self.assertEqual(e["note"], "woke: reviewed by http-a, http-b")
+        self.assertEqual(e["wait_since"], since)
+        self.cache("rereview.tsv", self.rereview_row(5))
+        self.cache("ci.json", json.dumps({"5": {"head": A[:12], "ok": True, "line": "CI=SUCCESS HEAD-MATCH", "at": ago(minutes=1)}}))
+        out = self.run_bank("plan").stdout
+        self.assertIn("PREPARE 5 lane=cq", out)
+        self.assertIn("(woke: reviewed by http-a, http-b)", out)
+
+    def test_a_push_or_the_until_time_wakes_a_hold(self):
+        self.write_entry(5, state="ready")
+        self.run_bank("hold", "5")
+        self.rules([self.sync_rule(self.reviewed_node(5, B))])
+        self.run_bank("sync")
+        self.assertEqual(self.entry(5)["note"], f"woke: new push {B[:12]}")
+        self.write_entry(6, state="ready")
+        self.run_bank("hold", "6", "--until-reviews", "0", "--until", "2026-01-02T03:04:05")
+        self.assertEqual(self.entry(6)["wait_for"], f"push={A[:12]},until=2026-01-02T03:04:05Z")
+        self.rules([self.sync_rule(self.reviewed_node(6, A, others=[("http-a", -1)]))])
+        self.run_bank("sync")
+        self.assertEqual(self.entry(6)["state"], "done")
+        self.assertEqual(self.entry(6)["note"], "woke: hold until 2026-01-02T03:04:05Z passed")
+
+    def test_hold_drops_the_dossier_and_unhold_wakes_it(self):
+        self.write_entry(5, state="ready")
+        d = self.bank / "dossier" / "5"
+        d.mkdir(parents=True)
+        self.run_bank("hold", "5", "--until", "2099-01-01T00:00:00Z")
+        self.assertFalse(d.exists())
+        self.assertIn("waiting", self.run_bank("list").stdout)
+        self.assertEqual(self.run_bank("present", check=False).returncode, 3)
+        self.run_bank("unhold", "5")
+        self.assertEqual(self.entry(5)["state"], "done")
+        self.assertEqual(self.entry(5)["note"], "woke: unheld by hand")
+        self.assertNotEqual(self.run_bank("unhold", "5", check=False).returncode, 0)
+
+    def test_an_approval_before_the_landing_wait_ends_waits(self):
+        self.write_entry(5, state="presented", lane="rereview", created_at=ago(hours=2))
+        node = self.reviewed_node(5, A, created=ago(hours=1))
+        node["reviews"]["nodes"] = [{"state": "APPROVED", "submittedAt": ago(minutes=10), "commit": {"oid": A}}]
+        self.cache("ci.json", json.dumps({"5": {"head": A[:12], "ok": True, "line": "CI=SUCCESS HEAD-MATCH", "at": ago(minutes=1)}}))
+        self.rules([self.sync_rule(node)])
+        self.run_bank("sync")
+        e = self.entry(5)
+        self.assertEqual(e["state"], "waiting")
+        self.assertTrue(e["disposition"].startswith("approved"))
+        self.assertRegex(e["wait_for"], rf"^reviews=1,push={A[:12]},landing=\S+Z$")
+        self.cache("rereview.tsv", self.rereview_row(5))
+        self.assertNotIn("PREPARE 5", self.run_bank("plan").stdout)
+        # The landing wait ends (fast-track here): the hold wakes into the cq lane.
+        node["labels"]["nodes"] = [{"name": "fast-track"}]
+        self.rules([self.sync_rule(node)])
+        self.run_bank("sync")
+        self.assertEqual(self.entry(5)["note"], "woke: landing wait over")
+        self.assertIn("PREPARE 5 lane=cq", self.run_bank("plan").stdout)
+
+    def test_an_approval_with_red_ci_waits_for_green_ci(self):
+        self.write_entry(5, state="presented", lane="rereview", created_at=ago(hours=2))
+        node = self.reviewed_node(5, A)
+        node["reviews"]["nodes"] = [{"state": "APPROVED", "submittedAt": ago(minutes=10), "commit": {"oid": A}}]
+        self.rules([self.sync_rule(node)])
+        self.run_bank("sync")
+        self.assertEqual(self.entry(5)["wait_for"], f"reviews=1,push={A[:12]},ci")
+        # A tick checks CI for the held cq candidate, and the next sync wakes it.
+        self.rereview_out.write_text(self.rereview_row(5))
+        self.cache("queue.stamp", ago(minutes=1))
+        self.run_bank("tick")
+        self.assertEqual(self.entry(5)["state"], "waiting")
+        self.run_bank("sync")
+        self.assertEqual(self.entry(5)["note"], f"woke: CI green at {A[:12]}")
+
+    def test_a_cq_candidate_waits_for_the_landing_wait(self):
+        green = json.dumps({"5": {"head": A[:12], "ok": True, "line": "CI=SUCCESS HEAD-MATCH", "at": ago(minutes=1)}})
+        self.cache("ci.json", green)
+        self.cache("rereview.tsv", self.rereview_row(5).rstrip("\n") + f"\t{ago(hours=10)}\t-\n")
+        self.assertRegex(self.run_bank("plan", "--all").stdout, r"SKIP 5 lane=cq landing wait until")
+        self.cache("rereview.tsv", self.rereview_row(5).rstrip("\n") + f"\t{ago(hours=10)}\tfast-track,http\n")
+        self.assertIn("PREPARE 5 lane=cq", self.run_bank("plan").stdout)
+
+    def test_the_landing_wait_is_72_hours_over_a_weekend(self):
+        code = ("import bank\n"
+                "for t in ('2026-11-16T12:00:00Z', '2026-11-19T12:00:00Z', '2026-11-22T12:00:00Z'):\n"
+                "    print(bank.iso(bank.landing_at(t, [])))\n"
+                "print(bank.iso(bank.landing_at('2026-11-19T12:00:00Z', ['fast-track'])))\n")
+        p = subprocess.run([sys.executable, "-c", code], cwd=SCRIPTS, env=dict(self.env, PYTHONDONTWRITEBYTECODE="1"), text=True,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.stdout.split(), ["2026-11-18T12:00:00Z", "2026-11-22T12:00:00Z",
+                                            "2026-11-25T12:00:00Z", "2026-11-19T12:00:00Z"])
+
 if __name__ == "__main__":
     unittest.main()

@@ -65,6 +65,8 @@ scripts/devc.sh run out/Release/node test/parallel/test-foo.js
 scripts/devc.sh run python3 tools/test.py --mode=release parallel/test-foo
 scripts/devc.sh status             # image age, container, built binary, old volumes
 scripts/devc.sh pull               # newer nightly image, about 10 GB: ask first
+scripts/devc.sh image              # image and container state as key=value lines, for scripts
+scripts/devc.sh prune              # remove this checkout's out/ volumes for unused images: ask first
 ```
 
 - Run it from the checkout (the main clone or a worktree). Each checkout gets its own container.
@@ -72,7 +74,7 @@ scripts/devc.sh pull               # newer nightly image, about 10 GB: ask first
 - **Don't run `./configure` or `ninja` by hand in the container.** `devc.sh build` matches the image's flags and interpreter, which keeps its prebuilt cache valid. Anything else can rebuild all of V8. `RECONFIGURE=1` forces a configure.
 - **To try a PR, use `repro.sh` in the main clone.** To run two at once, give the second one a detached review worktree with its own container (`git worktree add --detach .claude/worktrees/review-b main`, then `devc.sh build` there). In a linked worktree, `repro.sh` detaches at `main` instead of checking it out. Never `git checkout` an old PR head: one a few weeks behind `main` rebuilds all of V8. If it happens anyway, ask before recreating the `out/` volume (`devc.sh down`, remove the volume `devc.sh status` lists, `devc.sh build`). After it returns, `out/` holds the PR's build but the checkout is `main`, whose `lib/` the binary loads from disk. For a PR that changes `lib/`, check out the PR rebased onto `main` before testing it by hand.
 - **A crash may be a `DCHECK` that CI never sees.** The image builds with `--debug-node`, which turns `DCHECK`s on, and CI's Release build compiles them out. Check `main` in the same container before blaming a PR (`repro.sh` does), and say when a finding depends on a `DCHECK`.
-- A new container takes about 4 minutes to set up and build, so reuse the main clone's for reviews. Suggest `devc.sh pull` when `status` shows an image over a week old. A pull doesn't touch existing containers: a checkout moves to the new image after `devc.sh down`, then `build`. Never remove containers or volumes without asking.
+- A new container takes about 4 minutes to set up and build, so reuse the main clone's for reviews. Suggest `devc.sh pull` when `status` shows an image over a week old. A pull doesn't touch existing containers: a checkout moves to the new image after `devc.sh down`, then `build`. `devc.sh image` says whether the container is `outdated` or `busy`. Never remove containers or volumes without asking. `devc.sh prune` removes only this checkout's `out/` volumes for images that neither the local image nor its container uses. Other checkouts' volumes never match.
 
 ## Configure-time feature gating (both build paths)
 
@@ -236,7 +238,7 @@ Experimental doesn't mean main-only. On 2026-11-17, 76 of the last 80 closed `qu
 Paths are relative to this skill's directory. The `nodejs-review-queue` skill uses these too.
 
 - `lib.sh` — shared config (`REPO`/`ME`/`MY_TEAMS`) + `gh_retry` (GitHub secondary-rate-limit backoff).
-- `devc.sh <up|build|run|sh|status|pull|down>`: the default build and test environment: the nightly devcontainer, one container per checkout (run from the checkout; background `build`). Env toggles: `QUIC=1` (off by default), `DTLS=1`, `JOBS=N`, `RECONFIGURE=1`, `DEVC_ENGINE`, `DEVC_IMAGE`. See [Building in the devcontainer](#building-in-the-devcontainer-default-scriptsdevcsh).
+- `devc.sh <up|build|run|sh|status|pull|down|image|prune>`: the default build and test environment: the nightly devcontainer, one container per checkout (run from the checkout; background `build`). Env toggles: `QUIC=1` (off by default), `DTLS=1`, `JOBS=N`, `RECONFIGURE=1`, `DEVC_ENGINE`, `DEVC_IMAGE`. See [Building in the devcontainer](#building-in-the-devcontainer-default-scriptsdevcsh).
 - `build-node.sh`: local fallback, ccache reconfigure + `ninja` on the host (run from repo root; background it). Env toggles: `QUIC=1` (off by default), `DTLS=1`, `JOBS=N` (default `min(ncpu, RAM_GB/3)`), `NICE=1` (macOS background QoS). Prints the resolved configure args, the chosen `-j`, and a `features:` line on success.
 - `ci-status.sh <pr>` — authoritative CI via `ncu-ci`, verified against current head. `--check` verifies `ncu-ci` and `~/.ncurc` are set up.
 - `repro.sh <pr> <test-path> [runs]` — main-vs-PR failure/fix demonstration with the PR rebased onto main (`REBASE=0` for the head as-is); builds and runs in the devcontainer (`LOCAL=1` for the host); auto-builds native addons for node-api/addons tests; returns to `main` and cleans up.

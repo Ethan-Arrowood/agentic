@@ -1,8 +1,9 @@
 """Offline tests for bank.py. Run from scripts/: python3 -m unittest discover -s tests
 
 Each test gets a temporary bank, a fake gh on PATH (fake_gh.py), stub
-sibling scripts, and, where needed, a temporary git clone with an upstream.
-Nothing here touches the network or the real bank.
+sibling scripts (devc.sh is fake_devc.py), a Docker Hub response read from a
+file, and, where needed, a temporary git clone with an upstream. Nothing here
+touches the network, a container engine, or the real bank.
 """
 import fcntl, json, os, shutil, subprocess, sys, tempfile, time, unittest
 from datetime import datetime, timedelta, timezone
@@ -12,6 +13,7 @@ HERE = Path(__file__).resolve().parent
 SCRIPTS = HERE.parent
 BANK_PY = SCRIPTS / "bank.py"
 RQ_REAL = (SCRIPTS / "../../nodejs-review-queue/scripts").resolve()
+NC_REAL = (SCRIPTS / "../../nodejs-contribute/scripts").resolve()
 FIELDS = ["pr", "url", "title", "author", "lane", "state", "head", "pr_head", "acted_head", "created_at",
           "prepared_at", "presented_at", "updated_at", "my_teams", "rereview_from",
           "needs_run", "disposition", "disposition_at", "snooze_until", "lease", "note"]
@@ -66,13 +68,16 @@ class BankTest(unittest.TestCase):
         self.nc.mkdir()
         (self.nc / "ci-status.sh").write_text(
             '#!/bin/zsh\necho "#$1: ${FAKE_CI:-CI=SUCCESS  job=1  HEAD-MATCH}  [head ${FAKE_CI_HEAD:-aaaaaaaaaaaa}]"\n')
-        for p in (self.rq / "build-queue.sh", self.nc / "ci-status.sh"):
+        shutil.copy(HERE / "fake_devc.py", self.nc / "devc.sh")
+        for p in (self.rq / "build-queue.sh", self.nc / "ci-status.sh", self.nc / "devc.sh"):
             p.chmod(0o755)
+        self.hub = self.tmp / "hub.json"
         self.env = dict(os.environ, NODE_REVIEW_BANK=str(self.bank), FAKE_GH_DIR=str(self.fake),
+                        FAKE_DEVC_DIR=str(self.fake), DEVC_HUB_URL=self.hub.as_uri(),
                         PATH=f"{fakebin}:{os.environ['PATH']}", ME="me", GH_MIN_GAP="0",
                         GH_RETRY_SLEEP="0", RQ_SCRIPTS=str(self.rq), NC_SCRIPTS=str(self.nc),
                         NODE_CLONE=str(self.tmp / "clone"), REFRESH_MINUTES="100000")
-        for k in ("TERMINFO", "BANK_TARGET"):
+        for k in ("TERMINFO", "BANK_TARGET", "DEVC_IMAGE", "IMAGE_CHECK_MINUTES"):
             self.env.pop(k, None)
         self.rules([])
 
@@ -639,6 +644,204 @@ class BankTest(unittest.TestCase):
     def comment(self, login, assoc):
         return {"author": {"login": login}, "authorAssociation": assoc, "createdAt": ago(minutes=5),
                 "isMinimized": False, "minimizedReason": None, "body": "hi"}
+
+    def wait_for(self, cond, what, timeout=20):
+        for _ in range(int(timeout * 10)):
+            if cond():
+                return
+            time.sleep(0.1)
+        self.fail(f"timed out waiting for {what}")
+
+    def devc_state(self, image=None, slots=None, **extra):
+        """fake_devc.py state. slots maps a slot name (from make_slots) to its fields."""
+        img = {"image_id": "1" * 12, "image_digests": "docker.io/nodejs/devcontainer@sha256:old",
+               "image_created": "2026-11-19 03:59:40.160578228 +0000 UTC"}
+        img.update(image or {})
+        st = {"image": img, "slots": {os.path.realpath(self.tmp / f"slot{n}"): f for n, f in (slots or {}).items()}}
+        st.update(extra)
+        (self.fake / "state.json").write_text(json.dumps(st))
+
+    def hub_says(self, digest="sha256:new", arch="sha256:new-arm64", updated="2026-11-20T04:31:57.438312Z"):
+        self.hub.write_text(json.dumps({"name": "nightly", "digest": digest, "last_updated": updated,
+                                        "images": [{"architecture": "arm64", "digest": arch}]}))
+
+    def devc_calls(self, cmd=None):
+        p = self.fake / "calls.log"
+        calls = [json.loads(l) for l in p.read_text().splitlines()] if p.exists() else []
+        return [(Path(c).name, k) for c, k in calls if cmd in (None, k)]
+
+    def test_tick_pulls_a_newer_image_when_no_slot_is_held(self):
+        self.make_slots("1", "2")
+        self.devc_state(slots={"1": {"container_image": "1" * 12}, "2": {"container_image": "1" * 12}})
+        self.hub_says()
+        self.cache("queue.stamp", ago(minutes=1))
+        out = self.run_bank("tick").stdout
+        self.assertIn("pulling in the background", out)
+        self.wait_for(lambda: "rc" in json.loads((self.bank / "cache" / "image-pull.json").read_text()), "the pull")
+        self.assertEqual(self.devc_calls("pull"), [("slot1", "pull")])
+        # The Docker Hub answer is cached, and a pull isn't retried within the hour.
+        self.hub.unlink()
+        out = self.run_bank("tick").stdout
+        self.assertNotIn("check failed", out)
+        self.assertIn("the pull at", out)
+        self.assertEqual(len(self.devc_calls("pull")), 1)
+
+    def test_the_pull_waits_while_a_slot_is_held(self):
+        self.make_slots("1", "2")
+        self.devc_state()
+        self.hub_says()
+        self.cache("queue.stamp", ago(minutes=1))
+        self.run_bank("slot", "acquire", "1", "5")
+        out = self.run_bank("tick").stdout
+        self.assertIn("the pull and any moves wait until no slot is held (slot 1 for #5)", out)
+        self.assertFalse((self.bank / "cache" / "image-pull.json").exists())
+        self.assertEqual(self.devc_calls("pull"), [])
+
+    def test_an_image_matching_a_platform_digest_is_current(self):
+        self.make_slots("1")
+        self.devc_state(image={"image_digests": "docker.io/nodejs/devcontainer@sha256:new-arm64 x@sha256:other"})
+        self.hub_says()
+        self.cache("queue.stamp", ago(minutes=1))
+        out = self.run_bank("tick").stdout
+        self.assertIn("; current", out)
+        self.assertEqual(self.devc_calls("pull"), [])
+
+    def test_tick_moves_a_free_outdated_slot_and_never_a_held_one(self):
+        self.make_slots("1", "2")
+        gate = self.tmp / "gate"
+        old = {"container_image": "0" * 12}
+        self.devc_state(image={"image_digests": "x@sha256:new"}, slots={"1": dict(old), "2": dict(old)},
+                        wait={"build": str(gate)})
+        self.hub_says()
+        self.cache("queue.stamp", ago(minutes=1))
+        self.run_bank("slot", "acquire", "1", "5")
+        out = self.run_bank("tick").stdout
+        self.assertIn("slot 2: moving from 000000000000 to 111111111111", out)
+        self.wait_for(lambda: Path(str(gate) + ".reached").exists(), "the build")
+        # The moving slot is held: no agent gets it, and status says why.
+        self.assertEqual(self.run_bank("slot", "acquire", "any", "6", check=False).returncode, 3)
+        self.assertIn("moving to image 111111111111", self.run_bank("slot", "status").stdout)
+        self.assertIn("slot 2: moving to 111111111111", self.run_bank("tick").stdout)
+        gate.write_text("")
+        self.wait_for(lambda: not (self.bank / "locks" / "slot-2").exists(), "the slot release")
+        self.assertEqual(self.devc_calls("down") + self.devc_calls("build"), [("slot2", "down"), ("slot2", "build")])
+        self.assertEqual(json.loads((self.bank / "cache" / "image-moves.json").read_text())["2"]["rc"], 0)
+        self.assertTrue((self.bank / "locks" / "slot-1" / "owner.json").exists())
+
+    def test_a_busy_dirty_or_branched_slot_is_not_moved(self):
+        self.make_slots("1", "2", "3")
+        old = {"container_image": "0" * 12}
+        self.devc_state(image={"image_digests": "x@sha256:new"},
+                        slots={"1": dict(old, busy="yes"), "2": dict(old), "3": dict(old)})
+        (self.tmp / "slot2" / "untracked").write_text("x")
+        for args in (("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "x"),
+                     ("checkout", "-q", "-b", "mine")):
+            subprocess.run(["git", "-C", str(self.tmp / "slot3"), *args], check=True)
+        self.hub_says()
+        self.cache("queue.stamp", ago(minutes=1))
+        out = self.run_bank("tick").stdout
+        self.assertIn("slot 1: on older image 000000000000; the move waits (something runs", out)
+        self.assertIn("slot 2: on older image 000000000000; the move waits (checkout has changes)", out)
+        self.assertIn("slot 3: on older image 000000000000; the move waits (checkout is on mine", out)
+        self.assertEqual(self.devc_calls("down"), [])
+
+    def test_a_failed_move_releases_the_slot_and_is_not_retried_at_once(self):
+        self.make_slots("1")
+        self.devc_state(image={"image_digests": "x@sha256:new"}, slots={"1": {"container_image": "0" * 12}},
+                        rc={"build": 1})
+        self.hub_says()
+        self.cache("queue.stamp", ago(minutes=1))
+        self.run_bank("tick")
+        self.wait_for(lambda: (self.bank / "cache" / "image-moves.json").exists(), "the move")
+        self.wait_for(lambda: not (self.bank / "locks" / "slot-1").exists(), "the slot release")
+        out = self.run_bank("tick").stdout
+        self.assertIn("the move waits (the move at", out)
+        self.assertEqual(len(self.devc_calls("build")), 1)
+
+    def test_a_move_whose_worker_is_gone_is_reclaimed(self):
+        self.make_slots("1")
+        lock = self.bank / "locks" / "slot-1"
+        lock.mkdir(parents=True)
+        (lock / "owner.json").write_text(json.dumps({"pr": "image-move", "owner": "image-move", "at": ago(minutes=5)}))
+        out = self.run_bank("slot", "acquire", "any", "5").stdout
+        self.assertTrue(out.startswith("1\t"), out)
+
+    def test_acquire_prefers_a_slot_on_the_local_image(self):
+        self.make_slots("1", "2")
+        self.devc_state(slots={"1": {"container_image": "0" * 12}, "2": {"container_image": "1" * 12}})
+        self.assertTrue(self.run_bank("slot", "acquire", "any", "5").stdout.startswith("2\t"))
+        p = self.run_bank("slot", "acquire", "any", "6")
+        self.assertTrue(p.stdout.startswith("1\t"), p.stdout)
+        self.assertIn("older than the local 111111111111", p.stderr)
+
+    def test_slot_status_shows_the_image_commit_and_how_far_behind_main(self):
+        self.make_clone()
+        clone = self.tmp / "clone"
+        first = subprocess.run(["git", "-C", str(clone), "rev-list", "--max-parents=0", "upstream/main"],
+                               text=True, stdout=subprocess.PIPE, check=True).stdout.strip()
+        work = self.tmp / "work"
+        for msg in ("two", "three"):
+            subprocess.run(["git", "-C", str(work), "commit", "-q", "--allow-empty", "-m", msg], check=True)
+        subprocess.run(["git", "-C", str(work), "push", "-q", str(self.tmp / "upstream.git"), "HEAD:main"], check=True)
+        subprocess.run(["git", "-C", str(clone), "fetch", "-q", "upstream"], check=True)
+        self.make_slots("1")
+        self.devc_state(slots={"1": {"container_image": "0" * 12, "image_commit": first}})
+        out = self.run_bank("slot", "status").stdout
+        # pr, two, three are on upstream/main after the image's commit.
+        self.assertIn(f"image: 000000000000 built from {first[:12]} (3 commits behind upstream/main), "
+                      "OUTDATED: local image is 111111111111", out)
+
+    def test_image_prune_runs_only_in_free_slots(self):
+        self.make_slots("1", "2")
+        self.devc_state()
+        self.run_bank("slot", "acquire", "1", "5")
+        out = self.run_bank("image", "prune").stdout
+        self.assertIn("slot 1: held for #5, skipped", out)
+        self.assertEqual(self.devc_calls("prune"), [("slot2", "prune")])
+
+    def run_devc(self, cmd, state, check=True):
+        """The real devc.sh against fake_engine.py, in a scratch checkout."""
+        co = self.tmp / "node"
+        if not co.exists():
+            subprocess.run(["git", "init", "-q", str(co)], check=True)
+            (co / "node.gyp").write_text("")
+        (self.fake / "state.json").write_text(json.dumps(state))
+        p = subprocess.run(["bash", str(NC_REAL / "devc.sh"), cmd], cwd=co, text=True, stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, timeout=60,
+                           env=dict(self.env, DEVC_ENGINE=str(HERE / "fake_engine.py"), FAKE_ENGINE_DIR=str(self.fake)))
+        if check:
+            self.assertEqual(p.returncode, 0, p.stderr)
+        return p, dict(l.split("=", 1) for l in p.stdout.splitlines() if "=" in l)
+
+    def test_devc_image_and_prune_touch_only_this_checkouts_stale_volumes(self):
+        key = self.run_devc("image", {})[1]["key"]
+        cur, ctr, old = "1" * 12, "2" * 12, "3" * 12
+        vols = [f"node-devc-out-{key}-{cur}", f"node-devc-out-{key}-{ctr}", f"node-devc-out-{key}-{old}",
+                f"node-devc-out-{key}-x-123-{old}", f"node-devc-out-http-foo-1-{old}", "node-devc-ccache"]
+        state = {"image": {"id": cur + "abcd", "digests": ["r@sha256:a", "r@sha256:b"],
+                           "created": "2026-11-19 03:59:40.1 +0000 UTC"},
+                 "containers": {f"node-devc-{key}": {"state": "running", "image": ctr + "ef", "commit": "c" * 40}},
+                 "ps": "      1 Ss   sleep infinity\n     14 Z    [git] <defunct>\n    597 Rs   ps -eo pid=,stat=,args=",
+                 "volumes": vols}
+        info = self.run_devc("image", state)[1]
+        self.assertEqual(info["image_id"], cur)
+        self.assertEqual(info["image_digests"], "r@sha256:a r@sha256:b")
+        self.assertEqual(info["container_image"], ctr)
+        self.assertEqual(info["image_commit"], "c" * 40)
+        self.assertEqual((info["outdated"], info["busy"]), ("yes", "no"))
+        self.assertEqual(info["stale_volumes"], f"node-devc-out-{key}-{old}")
+        state["ps"] += "\n    600 S    bash -lc ninja"
+        self.assertEqual(self.run_devc("image", state)[1]["busy"], "yes")
+        self.run_devc("prune", state)
+        left = json.loads((self.fake / "state.json").read_text())["volumes"]
+        self.assertEqual(left, [v for v in vols if v != f"node-devc-out-{key}-{old}"])
+
+    def test_devc_prune_refuses_without_the_image(self):
+        key = self.run_devc("image", {})[1]["key"]
+        vols = [f"node-devc-out-{key}-{'3' * 12}"]
+        p, _ = self.run_devc("prune", {"volumes": vols}, check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertEqual(json.loads((self.fake / "state.json").read_text())["volumes"], vols)
 
     def test_discussion_reports_a_failed_block_lookup_as_unknown(self):
         out = self.run_discussion([self.comment("drive-by", "NONE")])

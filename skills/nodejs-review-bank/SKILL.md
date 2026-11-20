@@ -37,8 +37,8 @@ This skill builds on two others, which must be installed alongside it:
 |------|----------|
 | `prs/<pr>.md` | One entry per PR: front matter, then the review summary |
 | `dossier/<pr>/` | Prefetched GitHub data for preparing agents (see [The dossier](#the-dossier)). Deleted when the entry is done. |
-| `cache/` | Team queue, re-review lane, candidate metadata, CI results for `cq` candidates |
-| `locks/` | Tick, `gh`, per-entry, and slot locks. The kernel releases all but the slot locks when their process exits. |
+| `cache/` | Team queue, re-review lane, candidate metadata, CI results for `cq` candidates, the Docker Hub answer, and image pull and move results and logs |
+| `locks/` | Tick, `gh`, per-entry, slot, and image pull and move locks. The kernel releases all but the slot locks when their process exits. |
 | `archive/` | Earlier entries for a PR that came back after a new push |
 | `slots.tsv` | Slot name and checkout path, one per line |
 
@@ -117,6 +117,7 @@ It takes a lock, so overlapping ticks exit early. Then it:
 - Reruns `rereview.py --tsv` every tick (one search and a few GraphQL calls).
 - Syncs every open entry in one GraphQL batch: drops PRs that merged, closed, or became drafts, and PRs by the user. In nodejs, closed usually means landed (`nodejs-contribute`, *Landing*). Marks an entry `stale` when its head moved since preparation. Reads back the user's reviews, label changes, and comments since the entry was created, records them as the `disposition`, and marks the entry `done`, or `waiting` after an approval at a head that can't land yet. It checks each `waiting` entry's wake conditions (see [Holds](#holds)). A `cq` entry is also done once anyone adds the `commit-queue` label itself (not `commit-queue-squash`, `-rebase`, or `-failed`). Each entry is re-read under its lock before it's saved, so a `put`, `present`, or `set` made during the query isn't lost. An entry prefetched again during the query is left for the next sync.
 - Checks CI with `ci-status.sh` for up to 5 `cq` candidates (with no open entry, or held on `ci`) whose result is missing, for another head, or over 30 minutes old, oldest result first. A result counts for the head `ci-status.sh` reports.
+- Keeps the slots on the latest nightly image (see [Slot images](#slot-images)).
 - Prints the bank, a count of eligible candidates per lane, and `PREPARE <pr> lane=<lane>` lines: stale entries first, then new candidates in priority order, up to `BANK_TARGET` (6) active entries. A candidate is skipped while its entry is open, or when the user already acted on its current head in the same kind of lane. The cached team queue can be up to `REFRESH_MINUTES` old, so when an entry saw the PR more recently, the entry's head and state win: a PR the bank saw land or close isn't planned again. An approval in a review lane doesn't cover the commit-queue check, so the PR can still come back as `cq`. A `cq` candidate waits until CI is green at its head and the landing wait is over (see [Holds](#holds)). A held PR isn't planned. `bank.py plan --all` lists each skip with its reason, and each hold.
 
 ### 2. Prepare each planned PR
@@ -232,6 +233,20 @@ Rules:
 - `repro.sh` leaves the PR's build in `out/`. Run `devc.sh build` in the slot before anything that needs `main`'s binary.
 - A slot lock left without an owner record (a crash during `acquire`) is reclaimed after 60 seconds. `slot status` shows it.
 - Claude Code blocks `rm -rf` on variable paths. Clean up with literal paths.
+
+### Slot images
+
+Slot builds start from the devcontainer image's prebuilt `out/`, so the image's age sets the cost of every first build. A container keeps its image until `devc.sh down`. Each tick:
+
+1. Asks Docker Hub for the `nightly` tag at most every `IMAGE_CHECK_MINUTES` (60), and caches the answer.
+2. When the tag is another image, pushed after the local one was built, and no slot is held, starts `devc.sh pull` in the background (about 2 minutes, log `cache/image-pull.log`). While a slot is held, the pull and any moves wait. A failed pull is retried after `IMAGE_CHECK_MINUTES`.
+3. Once no pull is running, moves one free slot whose container is on an older image: it holds the slot as `image-move`, then runs `devc.sh down` and `devc.sh build` in the background (3 to 5 minutes, log `cache/image-move-<slot>.log`) and releases it. A slot waits when it's held, has changes, isn't on `main` or detached, or something runs in its container. A failed move is retried after `IMAGE_CHECK_MINUTES`. One move at a time, so other slots stay free.
+
+Nothing here touches a held slot. `slot acquire any` prefers a slot on the local image, and warns when it hands out an older one. `slot status` shows each container's image, the commit it was built from, and how far that is behind `upstream/main`. A slot left held as `image-move` by a lost worker is released after 60 seconds.
+
+A moved container builds without QUIC. QUIC PRs need `QUIC=1` (`nodejs-contribute`, *Configure-time feature gating*).
+
+`bank.py image prune` removes `out/` volumes for unused images, in free slots only, through `devc.sh prune`. It matches only volumes named for a slot checkout, never other worktrees' (such as `node-devc-out-http-*`). Ask before running it.
 
 Run recipes, from the slot's checkout:
 

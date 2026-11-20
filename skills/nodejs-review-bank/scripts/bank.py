@@ -17,13 +17,15 @@ rate limit. Read-only on GitHub: nothing here posts, labels, or reviews.
   bank.py hold <pr> [--until ISO] [--until-reviews N] [note]   wait for others' reviews, a push, or a time
   bank.py unhold <pr>                     end a hold now
   bank.py slot status|acquire <slot|any> <pr> [owner]|release <slot> <pr>|release <slot> --force
+  bank.py image prune                     remove free slots' out/ volumes for unused images
 
 Env: NODE_REVIEW_BANK (bank dir), NODE_CLONE (default ~/dev/nodejs/node),
 REPO, ME, BANK_TARGET (default 6), REFRESH_MINUTES (default 120),
 LEASE_MINUTES (default 120), RQ_SCRIPTS and NC_SCRIPTS (sibling skills' scripts),
-BANK_METADATA (lanes that get metadata.txt: cq, all, or off; default cq).
+BANK_METADATA (lanes that get metadata.txt: cq, all, or off; default cq),
+DEVC_IMAGE, IMAGE_CHECK_MINUTES (default 60), DEVC_HUB_URL (Docker Hub tag API URL).
 """
-import base64, fcntl, json, os, re, shutil, subprocess, sys, tempfile, time
+import base64, fcntl, json, os, re, shutil, subprocess, sys, tempfile, time, urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -42,6 +44,9 @@ RETRY_SLEEP = float(os.environ.get("GH_RETRY_SLEEP", "60"))
 CQ_CI_MAX_AGE = 30 * 60
 CQ_CI_PER_TICK = 5
 SLOT_OWNERLESS_GRACE = 60
+DEVC_IMAGE = os.environ.get("DEVC_IMAGE", "docker.io/nodejs/devcontainer:nightly")
+IMAGE_CHECK_MIN = int(os.environ.get("IMAGE_CHECK_MINUTES", "60"))
+MOVE = "image-move"  # slot owner and PR while a slot moves to the new image
 
 PRS, DOSSIER, CACHE, LOCKS, ARCHIVE = (BANK / d for d in ("prs", "dossier", "cache", "locks", "archive"))
 for d in (PRS, DOSSIER, CACHE, LOCKS, ARCHIVE):
@@ -1046,12 +1051,285 @@ def checkout_state(path):
     return st.returncode == 0, st.stdout.strip(), at
 
 
+# Image freshness. Slot builds start from the devcontainer image's prebuilt
+# out/, so the image's age sets the cost of every first build. The tick pulls a
+# newer nightly when no slot is held, then moves free slots to it one at a time
+# (devc.sh down, then build). Both run in the background. Neither touches a held
+# slot: a move holds its slot itself, as owner image-move.
+
+def devc_info(path):
+    """devc.sh image in a checkout, as a dict, or None when it fails."""
+    try:
+        p = subprocess.run([str(NC / "devc.sh"), "image"], cwd=path, env=ENV, text=True,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if p.returncode != 0:
+        return None
+    return dict(l.split("=", 1) for l in p.stdout.splitlines() if "=" in l)
+
+
+def read_cache_json(name):
+    try:
+        return json.loads((CACHE / name).read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def recent(t):
+    """Whether ISO time t is under IMAGE_CHECK_MINUTES ago."""
+    t = parse_iso(t) if t else None
+    return bool(t) and (now() - t).total_seconds() < IMAGE_CHECK_MIN * 60
+
+
+def parse_stamp(s):
+    """The UTC time at the start of an engine or Docker Hub timestamp
+    (2026-11-19 03:59:40.16 +0000 UTC, 2026-11-20T04:31:57.43Z)."""
+    m = re.match(r"(\d{4}-\d\d-\d\d)[T ](\d\d:\d\d:\d\d)", s or "")
+    return parse_iso(f"{m[1]}T{m[2]}Z") if m else None
+
+
+def hub_url():
+    if os.environ.get("DEVC_HUB_URL"):
+        return os.environ["DEVC_HUB_URL"]
+    m = re.fullmatch(r"(?:docker\.io/)?([\w.-]+)/([\w.-]+):([\w.-]+)", DEVC_IMAGE)
+    return f"https://hub.docker.com/v2/repositories/{m[1]}/{m[2]}/tags/{m[3]}" if m else None
+
+
+def hub_info():
+    """Docker Hub's view of the tag (its digests and last_updated), fetched at
+    most every IMAGE_CHECK_MINUTES. A failed fetch keeps the last good result."""
+    old = read_cache_json("image-hub.json")
+    if recent(old.get("checked_at")):
+        return old
+    url = hub_url()
+    if not url:
+        return {"error": f"{DEVC_IMAGE} is not a Docker Hub tag"}
+    info = {"checked_at": iso(now())}
+    try:
+        with urllib.request.urlopen(url, timeout=30) as r:
+            d = json.load(r)
+        info.update(digests=[d["digest"]] + [i["digest"] for i in d.get("images") or [] if i.get("digest")],
+                    last_updated=d["last_updated"])
+    except (OSError, ValueError, KeyError, TypeError) as err:
+        info.update({k: old[k] for k in ("digests", "last_updated") if k in old}, error=str(err)[:120])
+    write_atomic(CACHE / "image-hub.json", json.dumps(info))
+    return info
+
+
+def image_newer(local, hub):
+    """Whether Docker Hub's tag is another image, pushed after the local one was
+    built. Either the index digest or a per-platform one can be local."""
+    mine = {d.rpartition("@")[2] for d in local.get("image_digests", "").split()}
+    if not hub.get("digests") or mine & set(hub["digests"]):
+        return False
+    built, pushed = parse_stamp(local.get("image_created")), parse_stamp(hub.get("last_updated"))
+    return bool(pushed) and (not built or pushed > built)
+
+
+def running(name):
+    """Whether a background worker holds Flock(name)."""
+    lock = Flock(name)
+    if lock.acquire(wait=False):
+        lock.release()
+        return False
+    return True
+
+
+def worker_lock(name):
+    """Flock(name) for a worker, retried briefly: a tick probing it with
+    running() holds it for a moment."""
+    lock = Flock(name)
+    for _ in range(20):
+        if lock.acquire(wait=False):
+            return lock
+        time.sleep(0.5)
+    return None
+
+
+def spawn(args, log):
+    """Start bank.py <args> detached from this process, logging to cache/<log>."""
+    with open(CACHE / log, "w") as f:
+        subprocess.Popen([sys.executable, str(Path(__file__).resolve()), *args], env=ENV,
+                         stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
+
+
+def reclaim_moves():
+    """Free a slot still held for a move whose worker is gone."""
+    if running("image-move"):
+        return []
+    out = []
+    with Flock("slots"):
+        for name, _ in slots():
+            h = SlotLock(name).holder()
+            if h and h.get("owner") == MOVE and (now() - parse_iso(h["at"])).total_seconds() > SLOT_OWNERLESS_GRACE:
+                SlotLock(name).release()
+                out.append(f"slot {name}: its move worker is gone; released")
+    return out
+
+
+def image_tick():
+    """Pull a newer nightly when no slot is held, then move one free slot that
+    is on an older image. Returns report lines."""
+    out = reclaim_moves()
+    rows = [(name, path, SlotLock(name).holder()) for name, path in slots() if Path(path).exists()]
+    info = {name: devc_info(path) for name, path, _ in rows}
+    first = next(((name, path) for name, path, _ in rows if info[name]), None)
+    if not first:
+        return out + ["no slot checkout answered devc.sh image; skipped"]
+    local = info[first[0]]
+    if local.get("image_id", "missing") == "missing":
+        return out + [f"{DEVC_IMAGE} not found (missing, or the engine is down); a pull needs the user (about 10 GB)"]
+    hub = hub_info()
+    line = f"local {local['image_id']} built {(local.get('image_created') or '?')[:16]}"
+    if hub.get("last_updated"):
+        line += f", Docker Hub updated {hub['last_updated'][:16]}"
+    if hub.get("error"):
+        line += f" (check failed: {hub['error'][:80]})"
+    held = [f"slot {n} for #{h['pr']}" for n, _, h in rows if h]
+    last = read_cache_json("image-pull.json")
+    log = CACHE / "image-pull.log"
+    if running("image-pull"):
+        return out + [f"{line}; pull running since {last.get('started_at', '?')} (log {log})"]
+    if not hub.get("digests"):
+        out.append(f"{line}; not compared")
+    elif not image_newer(local, hub):
+        out.append(f"{line}; current")
+    elif held:
+        # No moves either: they would rebuild on an image the pull replaces.
+        return out + [f"{line}; newer on Docker Hub, the pull and any moves wait until no slot is held "
+                      f"({', '.join(held)})"]
+    elif recent(last.get("started_at")):
+        how = f"exited {last['rc']}" if "rc" in last else "did not finish"
+        out.append(f"{line}; newer on Docker Hub, but the pull at {last['started_at']} {how}; "
+                   f"retried {IMAGE_CHECK_MIN} minutes after it (log {log})")
+    else:
+        write_atomic(CACHE / "image-pull.json", json.dumps(
+            {"started_at": iso(now()), "from": local["image_id"], "path": first[1]}))
+        spawn(["image", "run-pull", first[1]], log.name)
+        return out + [f"{line}; newer on Docker Hub, pulling in the background (about 2 minutes, log {log})"]
+    return out + move_one(rows, info, local["image_id"])
+
+
+def move_one(rows, info, image):
+    """Hold one free slot whose container is on an older image as image-move,
+    and move it in the background. One at a time, so other slots stay free."""
+    moving = [(n, h) for n, _, h in rows if h and h.get("owner") == MOVE]
+    if moving:
+        n, h = moving[0]
+        return [f"slot {n}: moving to {h.get('to', '?')} since {h['at']} (log {CACHE / f'image-move-{n}.log'})"]
+    moves, out = read_cache_json("image-moves.json"), []
+    for name, path, h in rows:
+        i = info.get(name)
+        if not i or i.get("outdated") != "yes":
+            continue
+        ok, dirty, at = checkout_state(path)
+        last = moves.get(name) or {}
+        why = (f"held for #{h['pr']}" if h else
+               "git status failed" if not ok else
+               "checkout has changes" if dirty else
+               f"checkout is on {at}, not main" if at not in ("main", "HEAD") else
+               "something runs in its container" if i.get("busy") != "no" else
+               f"the move at {last['at']} failed at {last.get('step')}" if
+               last.get("to") == image and last.get("rc") and recent(last.get("at")) else None)
+        if not why:
+            with Flock("slots"):
+                got = SlotLock(name).acquire({"pr": MOVE, "owner": MOVE, "at": iso(now()),
+                                              "from": i["container_image"], "to": image})
+            if got:
+                spawn(["image", "run-move", name], f"image-move-{name}.log")
+                return out + [f"slot {name}: moving from {i['container_image']} to {image} in the background "
+                              f"(devc.sh down, then build: about 3 to 5 minutes)"]
+            why = "acquired meanwhile"
+        out.append(f"slot {name}: on older image {i['container_image']}; the move waits ({why})")
+    return out
+
+
+def run_pull(path):
+    """Background worker: devc.sh pull, with the result in cache/image-pull.json."""
+    lock = worker_lock("image-pull")
+    if not lock:
+        die("another pull is running", 0)
+    print(f"=== devc.sh pull in {path} @ {iso(now())}", flush=True)
+    rc = subprocess.run([str(NC / "devc.sh"), "pull"], cwd=path, env=ENV).returncode
+    rec = read_cache_json("image-pull.json")
+    rec.update(rc=rc, finished_at=iso(now()))
+    write_atomic(CACHE / "image-pull.json", json.dumps(rec))
+    print(f"=== exit {rc} @ {iso(now())}")
+
+
+def run_move(name):
+    """Background worker: down and build in a slot held as image-move, then
+    release it. Checks again that nothing runs in the container first."""
+    path = dict(slots()).get(name)
+    lock = worker_lock("image-move")
+    h = SlotLock(name).holder()
+    rec = {"at": iso(now()), "from": (h or {}).get("from"), "to": (h or {}).get("to")}
+    try:
+        if not h or h.get("owner") != MOVE:
+            print(f"slot {name} is not held for a move; nothing to do")
+            return
+        i = devc_info(path) if lock and path else None
+        if not i or i.get("outdated") != "yes" or i.get("busy") != "no":
+            rec.update(step="check", rc=0 if i and i.get("outdated") == "no" else 1)
+            print(f"not moving slot {name}: " + ("no longer outdated" if rec["rc"] == 0 else
+                  "another move is running" if not lock else "devc.sh image failed, or something runs in it"))
+        else:
+            for step in ("down", "build"):
+                print(f"=== devc.sh {step} in {path} @ {iso(now())}", flush=True)
+                rec.update(step=step, rc=subprocess.run([str(NC / "devc.sh"), step], cwd=path, env=ENV).returncode)
+                if rec["rc"]:
+                    break
+        moves = read_cache_json("image-moves.json")
+        moves[name] = dict(rec, finished_at=iso(now()))
+        write_atomic(CACHE / "image-moves.json", json.dumps(moves))
+        print(f"=== slot {name}: {rec.get('step')} exit {rec.get('rc')} @ {iso(now())}")
+    finally:
+        with Flock("slots"):
+            if (SlotLock(name).holder() or {}).get("owner") == MOVE:
+                SlotLock(name).release()
+
+
+def behind_main(commit):
+    """Commits on upstream/main, as last fetched, since commit, or ?."""
+    if not re.fullmatch(r"[0-9a-f]{7,40}", commit or ""):
+        return "?"
+    p = subprocess.run(["git", "-C", str(CLONE), "rev-list", "--count", f"{commit}..refs/remotes/upstream/main"],
+                       text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    return p.stdout.strip() if p.returncode == 0 else "?"
+
+
+def image_cmd(args):
+    if args[:1] == ["prune"]:
+        # Only free slots, and devc.sh prune keeps the volumes of the local
+        # image and of the slot's container. Other checkouts' volumes never match.
+        for name, path in slots():
+            h = SlotLock(name).holder()
+            if h or not Path(path).exists():
+                print(f"slot {name}: {'held for #' + h['pr'] if h else 'missing'}, skipped")
+                continue
+            p = subprocess.run([str(NC / "devc.sh"), "prune"], cwd=path, env=ENV, text=True,
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            print(f"slot {name}: " + (p.stdout.strip() or "nothing to remove").replace("\n", "\n  "))
+        return
+    if args[:1] == ["run-pull"] and len(args) == 2:
+        return run_pull(args[1])
+    if args[:1] == ["run-move"] and len(args) == 2:
+        return run_move(args[1])
+    die("usage: image prune", 2)
+
+
 def slot_cmd(args):
     if not args or args[0] == "status":
+        hub = read_cache_json("image-hub.json")
+        if hub.get("last_updated"):
+            print(f"image: Docker Hub updated {hub['last_updated'][:16]} (checked {hub.get('checked_at')})"
+                  + (", pull running" if running("image-pull") else ""))
         for name, path in slots():
             lock = SlotLock(name)
             h, since = lock.holder(), lock.ownerless_since()
-            held = (f"held for #{h['pr']} by {h['owner']} since {h['at']}" if h else
+            held = (f"moving to image {h.get('to')} since {h['at']}" if h and h.get("owner") == MOVE else
+                    f"held for #{h['pr']} by {h['owner']} since {h['at']}" if h else
                     f"lock has no owner record since {iso(since)} (reclaimed after {SLOT_OWNERLESS_GRACE}s)"
                     if since else "free")
             if not Path(path).exists():
@@ -1060,14 +1338,28 @@ def slot_cmd(args):
             ok, dirty, at = checkout_state(path)
             flag = ", DIRTY" if dirty else "" if ok else ", GIT STATUS FAILED"
             print(f"slot {name}: {path} [{at}{flag}] {held}")
+            i = devc_info(path)
+            if not i:
+                print("  image: devc.sh image failed")
+            elif i.get("container_state") == "none":
+                print(f"  image: no container (local image {i.get('image_id')})")
+            else:
+                print(f"  image: {i.get('container_image')} built from {i.get('image_commit', '-')[:12]} "
+                      f"({behind_main(i.get('image_commit'))} commits behind upstream/main)"
+                      + (f", OUTDATED: local image is {i.get('image_id')}" if i.get("outdated") == "yes" else ""))
         return
     if args[0] == "acquire":
         want, pr = args[1], args[2]
         owner = args[3] if len(args) > 3 else "orchestrator"
+        reclaim_moves()
+        # Prefer a slot whose container is on the local image.
+        info = {n: devc_info(p) for n, p in slots()
+                if want in ("any", n) and Path(p).exists() and not SlotLock(n).holder()}
+        order = sorted(slots(), key=lambda s: (info.get(s[0]) or {}).get("outdated") == "yes")
         with Flock("slots"):
             if any(h and h["pr"] == pr for h in (SlotLock(s).holder() for s, _ in slots())):
                 die(f"#{pr} already holds a slot; never run one PR in two slots (repro.sh uses a shared repro-{pr} branch)")
-            for name, path in slots():
+            for name, path in order:
                 if want not in ("any", name) or not Path(path).exists():
                     continue
                 ok, dirty, _ = checkout_state(path)
@@ -1076,6 +1368,10 @@ def slot_cmd(args):
                     continue
                 if SlotLock(name).acquire({"pr": pr, "owner": owner, "at": iso(now())}):
                     print(f"{name}\t{path}")
+                    i = info.get(name) or {}
+                    if i.get("outdated") == "yes":
+                        print(f"slot {name}: its container is on image {i.get('container_image')}, older than the "
+                              f"local {i.get('image_id')}; a tick moves it once it's free", file=sys.stderr)
                     return
         die("no free slot", 3)
     if args[0] == "release":
@@ -1283,6 +1579,11 @@ def main(argv):
             for l in sync():
                 print(l if l.startswith("  ") else f"  {l}")
             print(f"  cq CI: {refresh_cq_ci()}")
+            try:
+                for l in image_tick():
+                    print(f"  image: {l}")
+            except (RuntimeError, OSError, ValueError) as err:
+                print(f"  image: check failed ({str(err)[:120]})")
         finally:
             lock.release()
         target = int(args[args.index("--target") + 1]) if "--target" in args else TARGET
@@ -1316,6 +1617,8 @@ def main(argv):
         unhold_cmd(args[0])
     elif cmd == "slot":
         slot_cmd(args)
+    elif cmd == "image":
+        image_cmd(args)
     else:
         die(f"unknown command {cmd}", 2)
 

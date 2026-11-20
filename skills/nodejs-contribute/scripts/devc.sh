@@ -14,6 +14,9 @@
 #   devc.sh status        image, container, volumes, and the built binary
 #   devc.sh pull          pull the latest nightly image (about 10 GB)
 #   devc.sh down          remove this checkout's container; keeps volumes
+#   devc.sh image         image and container state as key=value lines, for scripts
+#   devc.sh prune         remove this checkout's out/ volumes for images neither the
+#                         local image nor its container uses (ask first)
 #
 # A container keeps its image after a pull. `down`, then `build`, moves the
 # checkout to the new image (and a new out/ volume).
@@ -35,7 +38,7 @@ MTIMES=$WS/out/.devc-mtimes         # mtimes restored for this out/ volume
 
 die() { echo "devc: $*" >&2; exit 1; }
 usage() { sed -n "2,/^set -e/p" "$0" | grep "^#" | sed "s/^# \{0,1\}//"; exit 2; }
-case "${1:-}" in up|build|run|sh|status|pull|down) ;; *) usage ;; esac
+case "${1:-}" in up|build|run|sh|status|pull|down|image|prune) ;; *) usage ;; esac
 [ -n "$ENGINE" ] || die "needs podman or docker on PATH"
 
 root=$(git rev-parse --show-toplevel 2>/dev/null) || die "run from a nodejs/node checkout"
@@ -230,6 +233,58 @@ status() {
   done
 }
 
+# State for scripts such as nodejs-review-bank, one key=value per line. Never
+# fails on a missing image or container. image_id is `missing` without the
+# image. outdated=yes: the container uses another image than the local one.
+# busy=yes: something besides the container's `sleep` runs in it (zombies don't
+# count), or the check failed. stale_volumes: this checkout's out/ volumes for
+# images neither the local image nor the container uses. The volume name must be
+# exactly node-devc-out-<this key>-<12 hex>, so another checkout whose key starts
+# with this one never matches.
+image_info() {
+  local id=missing digests="" created="" state=none cimg=- commit=- outdated=no busy=no
+  local line procs v stale=""
+  if line=$("$ENGINE" image inspect "$IMAGE" --format '{{.Id}}|{{range .RepoDigests}}{{.}} {{end}}|{{.Created}}' 2>/dev/null); then
+    IFS='|' read -r id digests created <<<"$line"
+    id=${id#sha256:}
+    id=${id:0:12}
+  fi
+  if line=$("$ENGINE" container inspect "$name" --format '{{.State.Status}}|{{.Image}}|{{index .Config.Labels "devc.image-commit"}}' 2>/dev/null); then
+    IFS='|' read -r state cimg commit <<<"$line"
+    cimg=${cimg#sha256:}
+    cimg=${cimg:0:12}
+    case "$commit" in ""|"<no value>") commit=- ;; esac
+    [ "$id" = missing ] || [ "$cimg" = "$id" ] || outdated=yes
+    if [ "$state" = running ]; then
+      if procs=$("$ENGINE" exec "$name" ps -eo pid=,stat=,args= 2>/dev/null); then
+        printf '%s\n' "$procs" | awk '$1 != 1 && $2 !~ /^Z/ && $3 != "ps" { found = 1 } END { exit !found }' && busy=yes
+      else
+        busy=yes
+      fi
+    fi
+  fi
+  for v in $("$ENGINE" volume ls --format '{{.Name}}' 2>/dev/null); do
+    case "${v#"node-devc-out-$key-"}" in
+      "$v"|"$id"|"$cimg") ;;
+      *) [[ "${v#"node-devc-out-$key-"}" =~ ^[0-9a-f]{12}$ ]] && stale="$stale $v" ;;
+    esac
+  done
+  printf '%s\n' "image=$IMAGE" "image_id=$id" "image_digests=${digests% }" "image_created=$created" \
+    "key=$key" "container=$name" "container_state=$state" "container_image=$cimg" \
+    "image_commit=$commit" "outdated=$outdated" "busy=$busy" "stale_volumes=${stale# }"
+}
+
+# Removes only what image_info lists as stale. Without the local image, every
+# volume would look stale, so it refuses.
+prune() {
+  local info v
+  info=$(image_info)
+  ! grep -qx 'image_id=missing' <<<"$info" || die "image $IMAGE is missing; not pruning"
+  for v in $(sed -n 's/^stale_volumes=//p' <<<"$info"); do
+    if "$ENGINE" volume rm "$v" >/dev/null; then echo "devc: removed $v"; else echo "devc: kept $v (in use?)" >&2; fi
+  done
+}
+
 case "${1:-}" in
   up) up ;;
   build) build ;;
@@ -238,5 +293,7 @@ case "${1:-}" in
   status) status ;;
   pull) "$ENGINE" pull "$IMAGE" && echo "devc: pulled. Containers keep their image until 'devc.sh down'; the next build then uses the new one." ;;
   down) "$ENGINE" rm -f "$name" >/dev/null && echo "devc: removed $name (volumes kept)" ;;
+  image) image_info ;;
+  prune) prune ;;
   *) usage ;;
 esac

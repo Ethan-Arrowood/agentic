@@ -1,0 +1,26 @@
+#!/bin/zsh
+# gh shim: runs the real gh with a cross-process lock, so every gh call made
+# through bank.py (including build-queue.sh, rereview.py, discussion.sh, and
+# ci-status.sh, which it runs with this directory first on PATH) is serial,
+# with at least GH_MIN_GAP seconds between calls. GitHub's secondary rate
+# limit trips on concurrent or bursty calls. The lock is a flock, which the
+# kernel releases when its holder exits, so a crash can't leave it stuck.
+zmodload zsh/datetime zsh/system
+self="${0:A}"
+real=""
+for p in ${(s.:.)PATH}; do
+  [[ -x "$p/gh" && "${${:-$p/gh}:A}" != "$self" ]] && { real="$p/gh"; break; }
+done
+[ -n "$real" ] || { echo "gh shim: no gh on PATH besides $self" >&2; exit 127; }
+
+lock="${GH_SHIM_LOCK:-${NODE_REVIEW_BANK:-${XDG_STATE_HOME:-$HOME/.local/state}/nodejs-review-bank}/locks/gh.lock}"
+mkdir -p "${lock:h}"; : >> "$lock"
+zsystem flock -f lockfd "$lock" || { echo "gh shim: could not lock $lock" >&2; exit 1; }
+
+last=$(cat "$lock.last" 2>/dev/null || echo 0)
+gap=$(( ${GH_MIN_GAP:-1} - (EPOCHREALTIME - last) ))
+(( gap > 0 )) && sleep $gap
+
+"$real" "$@"; rc=$?
+print $EPOCHREALTIME > "$lock.last"
+exit $rc

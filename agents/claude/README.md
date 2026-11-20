@@ -88,12 +88,13 @@ Each container clones the latest `main`, so rule changes reach the next cloud se
 
 ## Permissions for the Node.js skills
 
-A skill can't grant tool approval, so the `nodejs-contribute` and `nodejs-review-queue` scripts prompt on every run until you allow them. Add these once to `~/dev/nodejs/node/.claude/settings.local.json`, which is git-ignored. Merge with what's there; don't replace it.
+A skill can't grant tool approval, so the `nodejs-contribute`, `nodejs-review-queue`, and `nodejs-review-bank` scripts prompt on every run until you allow them. Add these once to `~/dev/nodejs/node/.claude/settings.local.json`, which is git-ignored. Merge with what's there; don't replace it.
 
 ```json
 { "permissions": { "allow": [
   "Bash(~/.claude/skills/nodejs-review-queue/scripts/*)",
   "Bash(~/.claude/skills/nodejs-contribute/scripts/*)",
+  "Bash(~/.claude/skills/nodejs-review-bank/scripts/*)",
   "Bash(zsh ~/.claude/skills/*)", "Bash(./.claude/tmp/*)",
   "Bash(ninja:*)", "Bash(ncu-ci:*)",
   "Bash(git fetch:*)", "Bash(git checkout:*)", "Bash(git pull:*)", "Bash(git log:*)",

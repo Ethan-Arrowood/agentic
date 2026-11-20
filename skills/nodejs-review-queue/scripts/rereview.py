@@ -22,6 +22,11 @@ GitHub computes `mergeable` lazily, so UNKNOWN is common. CQ-CANDIDATE rows
 with UNKNOWN are flagged "re-check mergeable".
 
 Usage: rereview.py [--all]        (run anywhere; uses gh)
+       rereview.py --tsv          every reviewed PR as tab-separated fields:
+         bucket number my_state my_state_commit my_last_review_commit head
+         approvals mergeable updated_at
+       where bucket is NONE when the user only commented, and missing values
+       are "-". The nodejs-review-bank skill reads this.
 Env: REPO (default nodejs/node), ME (default: gh api user).
 """
 import json, os, subprocess, sys
@@ -32,6 +37,7 @@ OWNER, NAME = REPO.split("/")
 ME = os.environ.get("ME") or subprocess.check_output(
     ["gh", "api", "user", "--jq", ".login"], text=True).strip()
 SHOW_ALL = "--all" in sys.argv
+TSV = "--tsv" in sys.argv
 DECISIVE = {"APPROVED", "CHANGES_REQUESTED", "DISMISSED"}
 
 
@@ -71,24 +77,43 @@ def classify(d):
     return "CURRENT", approvals
 
 
+def print_tsv(rows):
+    for d in rows:
+        b, approvals = classify(d)
+        mine = [r for r in d["reviews"]["nodes"]
+                if (r.get("author") or {}).get("login") == ME]
+        last = max(mine, key=lambda r: r["submittedAt"] or "", default={})
+        dec = latest_states(d["reviews"]["nodes"]).get(ME) or {}
+        oid = lambda r: (r.get("commit") or {}).get("oid") or "-"
+        print("\t".join(str(v) for v in (
+            b or "NONE", d["number"], dec.get("state", "-"), oid(dec),
+            oid(last), d["headRefOid"], approvals, d["mergeable"],
+            d["updatedAt"])))
+
+
 def main():
     nums = gh("api", "-X", "GET", "search/issues", "--paginate",
               "-f", f"q=repo:{REPO} is:pr is:open draft:false reviewed-by:{ME} -author:{ME}",
               "-f", "per_page=100", "--jq", ".items[].number").split()
     if not nums:
-        print("(no open PRs reviewed by you)")
+        if not TSV:
+            print("(no open PRs reviewed by you)")
         return
 
     rows = []
     for i in range(0, len(nums), 30):
         fields = " ".join(
-            f"p{n}: pullRequest(number:{n}){{number title createdAt headRefOid mergeable "
+            f"p{n}: pullRequest(number:{n}){{number title createdAt updatedAt headRefOid mergeable "
             f"labels(first:50){{nodes{{name}}}} "
             f"reviews(last:100){{nodes{{author{{login}} state commit{{oid}} submittedAt}}}}}}"
             for n in nums[i:i + 30])
         q = f'query{{repository(owner:"{OWNER}",name:"{NAME}"){{{fields}}}}}'
         data = json.loads(gh("api", "graphql", "-f", f"query={q}"))
         rows.extend(data["data"]["repository"].values())
+
+    if TSV:
+        print_tsv(rows)
+        return
 
     order = ["RE-REVIEW-ASAP", "RE-REVIEW", "CQ-CANDIDATE", "UNADDRESSED", "CURRENT"]
     icons = dict(zip(order, ["🔴", "🟠", "✅", "⏸", "·"]))

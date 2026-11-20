@@ -468,7 +468,8 @@ def plan(target=TARGET, show_all=False):
                      + (f"  {c.get('title', '')[:60]}" if c.get("title") else ""))
     if show_all:
         lines += [f"SKIP {c['pr']} lane={c['lane']} {why}" for c, why in skipped]
-    return lines, len(fresh)
+    counts = ", ".join(f"{k} {l}" for l in LANES if (k := sum(c["lane"] == l for c in fresh)))
+    return lines, counts or "none"
 
 
 SYNC_FIELDS = (
@@ -800,7 +801,7 @@ def list_cmd(show_all, target=TARGET):
         print(f"  {e['state']:<9} {e['lane']:<13} https://github.com/{REPO}/pull/{e['pr']}{extra}{snz}{disp}  {e['title'][:60]}")
 
 
-def put(n, summary, state=None, head=None):
+def put(n, summary, head=None):
     """Bank a verified summary. `head` is the head the draft was prepared
     against (the prefetch line the agent was given); without it, the
     dossier's meta.json. A draft for another head, or for an entry that is no
@@ -826,7 +827,7 @@ def put(n, summary, state=None, head=None):
         e["prepared_at"] = iso(now())
         e["lease"] = "-"
         e["note"] = "-"
-        e["state"] = state or ("needs-run" if pending else "ready")
+        e["state"] = "needs-run" if pending else "ready"
         if e.get("pr_head") not in (None, "-") and e["pr_head"] != e["head"]:
             e["state"] = "stale"
             e["note"] = f"head moved to {e['pr_head'][:12]} during preparation"
@@ -910,16 +911,16 @@ def main(argv):
         finally:
             lock.release()
         target = int(args[args.index("--target") + 1]) if "--target" in args else TARGET
-        lines, total = plan(target)
+        lines, counts = plan(target)
         list_cmd(False, target)
-        print(f"plan: {total} eligible candidates")
+        print(f"plan: eligible candidates by lane: {counts}")
         print("\n".join(lines) or "plan: bank is full")
     elif cmd == "sync":
         print("\n".join(sync(set(args) or None)))
     elif cmd == "plan":
         target = int(args[args.index("--target") + 1]) if "--target" in args else TARGET
-        lines, total = plan(target, "--all" in args)
-        print(f"plan: {total} eligible candidates")
+        lines, counts = plan(target, "--all" in args)
+        print(f"plan: eligible candidates by lane: {counts}")
         print("\n".join(lines) or "plan: bank is full")
     elif cmd == "list":
         list_cmd("--all" in args)
@@ -930,9 +931,8 @@ def main(argv):
     elif cmd == "prefetch":
         prefetch(args[0])
     elif cmd == "put":
-        st = args[args.index("--state") + 1] if "--state" in args else None
         hd = args[args.index("--head") + 1] if "--head" in args else None
-        put(args[0], args[1], st, hd)
+        put(args[0], args[1], hd)
     elif cmd == "set":
         set_cmd(args[0], args[1:])
     elif cmd == "slot":

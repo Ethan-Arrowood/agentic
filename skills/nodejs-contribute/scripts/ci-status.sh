@@ -25,12 +25,17 @@ if [ "$n" = "--check" ]; then
   exit $?
 fi
 
-head=$(gh pr view "$n" --repo "$REPO" --json headRefOid --jq '.headRefOid')
+read -r head mergeable < <(gh pr view "$n" --repo "$REPO" --json headRefOid,mergeable --jq '.headRefOid + " " + .mergeable')
+rec="add \`request-ci\`"; note=""
+if [ "$mergeable" = "CONFLICTING" ]; then
+  # Jenkins rebases onto main before building, which fails on a conflict.
+  rec="rebase first (CONFLICTING), then add \`request-ci\`"; note="  RECOMMEND: $rec"
+fi
 prjob=$(gh pr checks "$n" --repo "$REPO" 2>/dev/null \
         | grep -Eo 'node-test-pull-request/[0-9]+' | grep -Eo '[0-9]+' | head -1)
 
 if [ -z "$prjob" ]; then
-  echo "#$n: NO-RUN — no node-test-pull-request job. RECOMMEND: add \`request-ci\`  [head ${head:0:12}]"
+  echo "#$n: NO-RUN, no node-test-pull-request job. RECOMMEND: $rec  [head ${head:0:12}]"
   exit 0
 fi
 
@@ -46,7 +51,7 @@ if [ $rc -ne 0 ] || [ -z "$result" ]; then
 fi
 cicommit=$(print -r -- "$out" | grep -oE '\[[0-9a-f]{12}' | head -1 | tr -d '[')
 if [ "${head:0:12}" = "$cicommit" ]; then match="HEAD-MATCH"; else match="STALE (ran $cicommit != head ${head:0:12})"; fi
-echo "#$n: CI=$result  job=$prjob  $match  [head ${head:0:12}]"
+echo "#$n: CI=$result  job=$prjob  $match$note  [head ${head:0:12}]"
 if [ "$result" = "FAILURE" ]; then
   echo "  failure detail (classify: is it the PR's subsystem, or unrelated flake/rebase?):"
   print -r -- "$out" | grep -iE '^Type|^Reason|not ok [0-9]|CRASHED' | grep -ivE 'querying|download' | sed 's/^/    /' | head -14

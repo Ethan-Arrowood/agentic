@@ -18,7 +18,8 @@ rate limit. Read-only on GitHub: nothing here posts, labels, or reviews.
 
 Env: NODE_REVIEW_BANK (bank dir), NODE_CLONE (default ~/dev/nodejs/node),
 REPO, ME, BANK_TARGET (default 6), REFRESH_MINUTES (default 120),
-LEASE_MINUTES (default 120), RQ_SCRIPTS and NC_SCRIPTS (sibling skills' scripts).
+LEASE_MINUTES (default 120), RQ_SCRIPTS and NC_SCRIPTS (sibling skills' scripts),
+BANK_METADATA (lanes that get metadata.txt: cq, all, or off; default cq).
 """
 import base64, fcntl, json, os, re, shutil, subprocess, sys, tempfile, time
 from datetime import datetime, timedelta, timezone
@@ -631,6 +632,10 @@ def swap_in(n, new, tmp_ref, pr, info, head, lane, rf, cand):
                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     (new / "ci.txt").write_text(f"{ci.stdout}(ci-status.sh exit {ci.returncode}, {iso(now())})\n")
     (new / "release-lines.txt").write_text(active_lines())
+    gates = write_gates(n, new, info, head, tmp_ref)
+    if METADATA == "all" or (METADATA == "cq" and lane == "cq"):
+        # After the gh calls: git node metadata calls GitHub and Jenkins itself.
+        (new / "metadata.txt").write_text(ncu_metadata(n))
     (new / "meta.json").write_text(json.dumps({
         "pr": n, "head": head, "ref": f"refs/review-bank/{n}", "lane": lane,
         "rereview_from": rf, "clone": str(CLONE), "fetched_at": iso(now())}, indent=1))
@@ -665,6 +670,7 @@ def swap_in(n, new, tmp_ref, pr, info, head, lane, rf, cand):
         shutil.rmtree(gone, ignore_errors=True)
     print(f"{n}: dossier {d}\n  ref refs/review-bank/{n} = {head[:12]}, lane {lane}, state preparing")
     print("  " + ci.stdout.strip().splitlines()[0] if ci.stdout.strip() else "  ci: no output")
+    print(f"  gates: {gates}")
 
 
 def discussion(n):
@@ -679,6 +685,201 @@ def discussion(n):
     d["rules"] = ("excluded items are not credited and don't count as already raised; "
                   "status resolved-context means hidden as outdated, duplicate, or resolved")
     return json.dumps(d, indent=1)
+
+
+METADATA = os.environ.get("BANK_METADATA", "cq")  # which lanes get metadata.txt: cq, all, or off
+METADATA_TIMEOUT = 180
+PASSING = {"SUCCESS", "SKIPPED", "NEUTRAL"}
+GATES_QUERY = """query{repository(owner:"%s",name:"%s"){pullRequest(number:%s){
+ reviewDecision
+ commits(last:1){nodes{commit{oid statusCheckRollup{state contexts(first:100){totalCount nodes{__typename
+  ...on CheckRun{name status conclusion detailsUrl checkSuite{workflowRun{workflow{name}}}}
+  ...on StatusContext{context state targetUrl}}}}}}}
+ timelineItems(last:100,itemTypes:[HEAD_REF_FORCE_PUSHED_EVENT,PULL_REQUEST_COMMIT]){totalCount nodes{__typename
+  ...on HeadRefForcePushedEvent{createdAt actor{login} beforeCommit{oid} afterCommit{oid}}
+  ...on PullRequestCommit{commit{oid committedDate messageHeadline checkSuites(first:1){nodes{createdAt}}}}}}
+ reviewRequests(first:50){nodes{requestedReviewer{__typename ...on Team{slug} ...on User{login}}}}
+ latestOpinionatedReviews(first:100){nodes{author{login} state submittedAt commit{oid} onBehalfOf(first:20){nodes{slug}}}}
+}}}"""
+
+
+def nodes(d, key):
+    return ((d or {}).get(key) or {}).get("nodes") or []
+
+
+def write_gates(n, new, info, head, ref):
+    """gates.json (check runs and statuses on the head, reviews, code owners)
+    and timeline.json (pushes) from one GraphQL query and the clone's
+    CODEOWNERS. A failed query is recorded in both files and doesn't stop the
+    prefetch. Returns a one-line summary."""
+    at, err = iso(now()), None
+    try:
+        pr = graphql(GATES_QUERY % (OWNER, NAME, n)).get("pullRequest")
+        if not pr:
+            raise RuntimeError("pull request not found")
+    except RuntimeError as e:
+        pr, err = {}, str(e)
+
+    commit = (nodes(pr, "commits") or [{}])[0].get("commit") or {}
+    roll = commit.get("statusCheckRollup") or {}
+    runs = []
+    for c in nodes(roll, "contexts"):
+        if c.get("__typename") == "CheckRun":
+            wf = (((c.get("checkSuite") or {}).get("workflowRun") or {}).get("workflow") or {}).get("name")
+            runs.append({"name": c.get("name"), "workflow": wf, "result": c.get("conclusion") or c.get("status"),
+                         "url": c.get("detailsUrl")})
+        else:  # a commit status, such as Jenkins
+            runs.append({"name": c.get("context"), "workflow": None, "result": c.get("state"),
+                         "url": c.get("targetUrl")})
+    total = (roll.get("contexts") or {}).get("totalCount", 0)
+    counts = {}
+    for r in runs:
+        counts[r["result"]] = counts.get(r["result"], 0) + 1
+    not_passing = [r for r in runs if r["result"] not in PASSING]
+
+    reviews = [{"author": (r.get("author") or {}).get("login") or "ghost", "state": r.get("state"),
+                "commit": (r.get("commit") or {}).get("oid"), "at": r.get("submittedAt"),
+                "on_behalf_of": [f"@{OWNER}/{t['slug']}" for t in nodes(r, "onBehalfOf")]}
+               for r in nodes(pr, "latestOpinionatedReviews")]
+    requested = []
+    for r in nodes(pr, "reviewRequests"):
+        who = r.get("requestedReviewer") or {}
+        requested.append(f"@{OWNER}/{who['slug']}" if who.get("slug") else f"@{who.get('login')}")
+
+    co = code_owners(info.get("baseRefName") or "main", ref, head, [f["path"] for f in info.get("files") or []])
+    for o, v in co.get("owners", {}).items():
+        v["status"] = "unknown: the query failed" if err else owner_status(o, reviews, requested)
+
+    gates = {"head": head, "fetched_at": at, "error": err, "reviewDecision": pr.get("reviewDecision"),
+             "checks": {"commit": commit.get("oid"), "state": roll.get("state"), "total": total,
+                        "truncated": total > len(runs), "counts": counts, "not_passing": not_passing,
+                        "all": [{k: r[k] for k in ("name", "workflow", "result")} for r in runs]},
+             "reviews": reviews, "review_requests": requested, "codeowners": co}
+    (new / "gates.json").write_text(json.dumps(gates, indent=1))
+
+    events = []
+    for t in nodes(pr, "timelineItems"):
+        if t.get("__typename") == "HeadRefForcePushedEvent":
+            events.append({"type": "force-push", "at": t.get("createdAt"),
+                           "actor": (t.get("actor") or {}).get("login"),
+                           "before": (t.get("beforeCommit") or {}).get("oid"),
+                           "after": (t.get("afterCommit") or {}).get("oid")})
+        elif t.get("__typename") == "PullRequestCommit":
+            c = t.get("commit") or {}
+            suites = nodes(c, "checkSuites")
+            events.append({"type": "commit", "oid": c.get("oid"), "headline": c.get("messageHeadline"),
+                           "committed_at": c.get("committedDate"),
+                           "first_check_at": suites[0].get("createdAt") if suites else None})
+    forced = [e for e in events if e["type"] == "force-push" and e["after"] == head]
+    first = [e["first_check_at"] for e in events if e["type"] == "commit" and e["oid"] == head and e["first_check_at"]]
+    pushed = ({"at": forced[-1]["at"], "source": "force-push event"} if forced else
+              {"at": first[0], "source": "first check suite on the head (approximate)"} if first else
+              {"at": None, "source": "unknown"})
+    ttotal = (pr.get("timelineItems") or {}).get("totalCount", 0)
+    (new / "timeline.json").write_text(json.dumps({
+        "head": head, "fetched_at": at, "error": err, "head_pushed_at": pushed,
+        "note": ("GitHub no longer reports commit push times. first_check_at is when the first check suite "
+                 "for a commit was created, close to when it was pushed as the PR head; null means it was "
+                 "pushed under a later commit or got no checks. committed_at is the committer date, which a "
+                 "rebase resets. Events are oldest first, the last 100 only."),
+        "total": ttotal, "truncated": ttotal > len(events), "events": events}, indent=1))
+
+    if err:
+        return f"query FAILED ({err[:120]}); see gates.json"
+    unapproved = [o for o, v in co.get("owners", {}).items() if not v["status"].startswith("approved")]
+    return (f"reviewDecision {pr.get('reviewDecision') or '-'}, checks {roll.get('state') or '-'} "
+            f"({len(not_passing)} not passing), code owners without an approval: {' '.join(unapproved) or 'none'}")
+
+
+def owner_status(owner, reviews, requested):
+    """Whether a code owner has reviewed. A team counts only through a review
+    made on its behalf, which GitHub records when the team was requested."""
+    mine = [r for r in reviews if owner in r["on_behalf_of"] or owner == f"@{r['author']}"]
+    ok = [r["author"] for r in mine if r["state"] == "APPROVED"]
+    if ok:
+        return f"approved by {', '.join(ok)}"
+    if mine:
+        return f"{mine[0]['state'].lower()} by {mine[0]['author']}"
+    if owner in requested:
+        return "requested, no review on its behalf yet"
+    return "not requested, no review on its behalf (a member may have reviewed without the request)"
+
+
+def code_owners(base, ref, head, paths):
+    """The owners of each changed path, from .github/CODEOWNERS on the base
+    branch (the one GitHub applies), else at the PR head. The last matching
+    line wins, as on GitHub."""
+    for src, label in ((f"refs/remotes/upstream/{base}", f"upstream/{base}"), (ref, f"PR head {head[:12]}")):
+        text = git("show", f"{src}:.github/CODEOWNERS", check=False)
+        if text:
+            break
+    else:
+        return {"source": None, "error": "no .github/CODEOWNERS on the base branch or at the PR head"}
+    rules = []
+    for line in text.splitlines():
+        parts = line.split("#", 1)[0].split()
+        if parts:
+            rules.append((codeowners_re(parts[0]), parts[1:]))
+    owners, unowned = {}, []
+    for p in paths:
+        hit = next((o for rx, o in reversed(rules) if rx.fullmatch(p)), None)
+        if hit is None:
+            unowned.append(p)
+        for o in hit or []:
+            owners.setdefault(o, {"paths": []})["paths"].append(p)
+    return {"source": f"{label}:.github/CODEOWNERS", "owners": owners, "unowned_paths": unowned,
+            "files_maybe_truncated": len(paths) >= 100,
+            "note": "pattern matching approximates GitHub's; check a surprising owner against the file"}
+
+
+def codeowners_re(pat):
+    """A CODEOWNERS pattern as a regex over repository paths. A leading or
+    inner / anchors it to the root, * stays within a directory, ** crosses
+    them, and a pattern ending in * matches only files directly under it (as
+    GitHub documents). A match on a directory covers everything below it."""
+    anchored = "/" in pat.rstrip("/")
+    p, out, i = pat.strip("/"), "", 0
+    while i < len(p):
+        if p.startswith("**/", i):
+            out, i = out + "(?:.*/)?", i + 3
+        elif p.startswith("**", i):
+            out, i = out + ".*", i + 2
+        else:
+            out += {"*": "[^/]*", "?": "[^/]"}.get(p[i], re.escape(p[i]))
+            i += 1
+    return re.compile(("" if anchored else "(?:.*/)?") + out + ("" if p.endswith("*") else "(?:/.*)?"))
+
+
+def ncu_metadata(n):
+    """git node metadata (node-core-utils), read-only: approvals by name, the
+    last Jenkins CI, failed GitHub Actions jobs, and the generated commit
+    metadata. It calls GitHub with its own token, not gh, so it holds the gh
+    shim's lock to stay serial with every gh call. The shim locks with
+    zsystem flock, which is an fcntl lock, so this uses lockf, not Flock.
+    Never raises: a failure is written to the file."""
+    lock = Path(os.environ.get("GH_SHIM_LOCK") or LOCKS / "gh.lock")
+    fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.lockf(fd, fcntl.LOCK_EX)
+        try:
+            p = subprocess.run(["git", "node", "metadata", n, "--owner", OWNER, "--repo", NAME],
+                               cwd=CLONE if CLONE.is_dir() else None, env=ENV, text=True,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=METADATA_TIMEOUT)
+            out, err, status = p.stdout, p.stderr, f"exit {p.returncode}"
+        except subprocess.TimeoutExpired as e:
+            dec = lambda b: b.decode(errors="replace") if isinstance(b, bytes) else (b or "")
+            out, err, status = dec(e.stdout), dec(e.stderr), f"timed out after {METADATA_TIMEOUT}s"
+        except OSError as e:
+            out, err, status = "", str(e), "could not run"
+        lock.with_name(lock.name + ".last").write_text(f"{time.time()}\n")  # the shim's GH_MIN_GAP
+    finally:
+        os.close(fd)
+    # The report goes to stderr and the generated metadata to stdout, which
+    # the report already repeats.
+    text = err if out.strip() and out.strip() in err else err + out
+    text = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", text).replace("\r\n", "\n").replace("\r", "\n")
+    lines = [l for l in text.splitlines() if not re.match(r"\s*[\u2800-\u28ff]", l)]  # spinner frames
+    return "\n".join(lines) + f"\n(git node metadata {status}, {iso(now())})\n"
 
 
 def fetch_upstream():

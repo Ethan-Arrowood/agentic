@@ -44,6 +44,14 @@ class BankTest(unittest.TestCase):
         fakebin.mkdir()
         shutil.copy(HERE / "fake_gh.py", fakebin / "gh")
         (fakebin / "gh").chmod(0o755)
+        # `git node` runs git-node from PATH: log the call and whether the gh shim's lock is held,
+        # and print FAKE_NCU_OUT to stderr like ncu's report.
+        (fakebin / "git-node").write_text(
+            f'#!/bin/zsh\nzmodload zsh/system\nprint -r -- "$*" >> "{self.fake}/git-node.log"\n'
+            'zsystem flock -t 0 "$NODE_REVIEW_BANK/locks/gh.lock" 2>/dev/null && l=free || l=held\n'
+            f'print -r -- "gh lock $l" >> "{self.fake}/git-node.log"\n'
+            'print -rn -- "${FAKE_NCU_OUT:-}" >&2\nexit ${FAKE_NCU_RC:-0}\n')
+        (fakebin / "git-node").chmod(0o755)
         # Sibling skills: real lib.sh and discussion.sh, stubbed queue scripts.
         self.rq = self.tmp / "rq"
         self.rq.mkdir()
@@ -295,6 +303,111 @@ class BankTest(unittest.TestCase):
                              text=True, stdout=subprocess.PIPE).stdout.strip()
         self.assertEqual(ref, old_ref)
 
+
+    def add_codeowners(self, text):
+        """Commit .github/CODEOWNERS to upstream main, which prefetch fetches."""
+        work = self.tmp / "work"
+        g = lambda *a: subprocess.run(["git", *a], cwd=work, check=True, stdout=subprocess.PIPE,
+                                      stderr=subprocess.PIPE)
+        g("checkout", "-q", "main")
+        (work / ".github").mkdir(exist_ok=True)
+        (work / ".github" / "CODEOWNERS").write_text(text)
+        g("add", ".github")
+        g("commit", "-qm", "owners")
+        g("push", "-q", str(self.tmp / "upstream.git"), "main")
+
+    def gates_rule(self, head, reviews=(), requests=(), contexts=(), timeline=()):
+        pr = {"reviewDecision": "REVIEW_REQUIRED",
+              "commits": {"nodes": [{"commit": {"oid": head, "statusCheckRollup": {
+                  "state": "FAILURE", "contexts": {"totalCount": len(contexts), "nodes": list(contexts)}}}}]},
+              "timelineItems": {"totalCount": len(timeline), "nodes": list(timeline)},
+              "reviewRequests": {"nodes": list(requests)},
+              "latestOpinionatedReviews": {"nodes": list(reviews)}}
+        return {"match": ["graphql", "statusCheckRollup"], "stdout": {"data": {"repository": {"pullRequest": pr}}}}
+
+    def prefetch_gates(self, lane="cq", gates=None, env=None):
+        head = self.make_clone()
+        self.add_codeowners("# owners\n/lib/internal/http2/* @nodejs/http2 @nodejs/net\n"
+                            "/lib/net.js @nodejs/net\n*.gyp @nodejs/gyp\n/doc/ @nodejs/docs\n")
+        self.cache("release-lines.txt", "active release lines: v22 v24 v26\n")
+        if lane == "cq":
+            self.cache("rereview.tsv", self.rereview_row(5, head=head))
+        rules = self.prefetch_rules(head)
+        rules[1]["stdout"]["files"] = [{"path": p} for p in (
+            "lib/internal/http2/core.js", "lib/internal/http2/sub/x.js", "lib/net.js", "tools/a.gyp",
+            "doc/api/net.md", "src/pipe_wrap.cc")]
+        if gates is None:
+            gates = self.gates_rule(head, reviews=[
+                {"author": {"login": "alice"}, "state": "APPROVED", "submittedAt": ago(hours=1),
+                 "commit": {"oid": head}, "onBehalfOf": {"nodes": [{"slug": "net"}]}}],
+                requests=[{"requestedReviewer": {"__typename": "Team", "slug": "http2"}}],
+                contexts=[{"__typename": "CheckRun", "name": "lint-js", "status": "COMPLETED", "conclusion": "FAILURE",
+                           "detailsUrl": "https://example.test/1",
+                           "checkSuite": {"workflowRun": {"workflow": {"name": "Linters"}}}},
+                          {"__typename": "CheckRun", "name": "test-linux", "status": "COMPLETED",
+                           "conclusion": "SUCCESS", "detailsUrl": "u", "checkSuite": None},
+                          {"__typename": "StatusContext", "context": "node-test-pull-request", "state": "PENDING",
+                           "targetUrl": "https://ci.example.test/2"}],
+                timeline=[{"__typename": "PullRequestCommit", "commit": {
+                              "oid": A, "committedDate": ago(days=2), "messageHeadline": "old",
+                              "checkSuites": {"nodes": [{"createdAt": ago(days=2)}]}}},
+                          {"__typename": "HeadRefForcePushedEvent", "createdAt": ago(hours=3),
+                           "actor": {"login": "someone"}, "beforeCommit": {"oid": A}, "afterCommit": {"oid": head}},
+                          {"__typename": "PullRequestCommit", "commit": {
+                              "oid": head, "committedDate": ago(hours=4), "messageHeadline": "pr",
+                              "checkSuites": {"nodes": [{"createdAt": ago(hours=3)}]}}}])
+        self.rules([gates] + rules)
+        out = self.run_bank("prefetch", "5", env=env).stdout
+        return head, self.bank / "dossier" / "5", out
+
+    def test_prefetch_writes_gates_timeline_and_code_owners(self):
+        head, d, out = self.prefetch_gates()
+        self.assertIn("code owners without an approval: @nodejs/http2", out)
+        g = json.loads((d / "gates.json").read_text())
+        self.assertEqual(g["reviewDecision"], "REVIEW_REQUIRED")
+        self.assertEqual([r["name"] for r in g["checks"]["not_passing"]], ["lint-js", "node-test-pull-request"])
+        self.assertEqual(g["checks"]["not_passing"][0]["workflow"], "Linters")
+        co = g["codeowners"]
+        self.assertEqual(co["source"], "upstream/main:.github/CODEOWNERS")
+        owners = co["owners"]
+        self.assertEqual(owners["@nodejs/http2"]["paths"], ["lib/internal/http2/core.js"])
+        self.assertEqual(owners["@nodejs/net"]["paths"], ["lib/internal/http2/core.js", "lib/net.js"])
+        self.assertEqual(owners["@nodejs/gyp"]["paths"], ["tools/a.gyp"])
+        self.assertEqual(owners["@nodejs/docs"]["paths"], ["doc/api/net.md"])
+        self.assertEqual(co["unowned_paths"], ["lib/internal/http2/sub/x.js", "src/pipe_wrap.cc"])
+        self.assertTrue(owners["@nodejs/net"]["status"].startswith("approved by alice"))
+        self.assertTrue(owners["@nodejs/http2"]["status"].startswith("requested"))
+        self.assertTrue(owners["@nodejs/docs"]["status"].startswith("not requested"))
+        t = json.loads((d / "timeline.json").read_text())
+        self.assertEqual(t["head_pushed_at"]["source"], "force-push event")
+        self.assertEqual([e["type"] for e in t["events"]], ["commit", "force-push", "commit"])
+
+    def test_prefetch_writes_ncu_metadata_for_cq_entries_only(self):
+        env = dict(self.env, FAKE_NCU_RC="1", FAKE_NCU_OUT=(
+            "\x1b[36m⠋\x1b[39m Loading data for nodejs/node/pull/5\n"
+            "   ✔  Approvals: 2\n   ✖  1 GitHub CI job(s) failed:\n"))
+        _, d, _ = self.prefetch_gates(env=env)
+        text = (d / "metadata.txt").read_text()
+        self.assertIn("Approvals: 2", text)
+        self.assertIn("(git node metadata exit 1,", text)
+        self.assertNotIn("\x1b", text)
+        self.assertNotIn("Loading data", text)
+        log = (self.fake / "git-node.log").read_text().splitlines()
+        self.assertEqual(log[0].split()[:2], ["metadata", "5"])
+        self.assertEqual(log[1], "gh lock held")
+
+    def test_prefetch_skips_ncu_metadata_outside_the_cq_lane(self):
+        _, d, _ = self.prefetch_gates(lane="fresh")
+        self.assertFalse((d / "metadata.txt").exists())
+        self.assertFalse((self.fake / "git-node.log").exists())
+
+    def test_a_failed_gates_query_does_not_stop_the_prefetch(self):
+        _, d, out = self.prefetch_gates(gates={"match": ["graphql", "statusCheckRollup"], "rc": 1, "stderr": "boom"})
+        self.assertIn("gates: query FAILED", out)
+        self.assertEqual(self.entry(5)["state"], "preparing")
+        self.assertTrue(json.loads((d / "gates.json").read_text())["error"])
+        self.assertTrue(json.loads((d / "timeline.json").read_text())["error"])
+        self.assertTrue((d / "metadata.txt").exists())
 
     def make_slots(self, *names):
         rows = []

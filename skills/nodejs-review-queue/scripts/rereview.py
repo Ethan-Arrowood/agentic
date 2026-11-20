@@ -24,9 +24,10 @@ with UNKNOWN are flagged "re-check mergeable".
 Usage: rereview.py [--all]        (run anywhere; uses gh)
        rereview.py --tsv          every reviewed PR as tab-separated fields:
          bucket number my_state my_state_commit my_last_review_commit head
-         approvals mergeable updated_at
-       where bucket is NONE when the user only commented, and missing values
-       are "-". The nodejs-review-bank skill reads this.
+         approvals mergeable updated_at created_at labels
+       where bucket is NONE when the user only commented, labels are
+       comma-separated, and missing values are "-". The nodejs-review-bank
+       skill reads this.
 Env: REPO (default nodejs/node), ME (default: gh api user).
 """
 import json, os, subprocess, sys
@@ -88,7 +89,8 @@ def print_tsv(rows):
         print("\t".join(str(v) for v in (
             b or "NONE", d["number"], dec.get("state", "-"), oid(dec),
             oid(last), d["headRefOid"], approvals, d["mergeable"],
-            d["updatedAt"])))
+            d["updatedAt"], d["createdAt"],
+            ",".join(l["name"] for l in d["labels"]["nodes"]) or "-")))
 
 
 def main():

@@ -14,6 +14,8 @@ rate limit. Read-only on GitHub: nothing here posts, labels, or reviews.
   bank.py prefetch <pr>                   fetch the PR's dossier and claim the entry
   bank.py put <pr> <summary.md> [--head <sha>]   bank a verified summary (ready or needs-run)
   bank.py set <pr> key=value...           edit entry fields (state=done disposition=skipped)
+  bank.py hold <pr> [--until ISO] [--until-reviews N] [note]   wait for others' reviews, a push, or a time
+  bank.py unhold <pr>                     end a hold now
   bank.py slot status|acquire <slot|any> <pr> [owner]|release <slot> <pr>|release <slot> --force
 
 Env: NODE_REVIEW_BANK (bank dir), NODE_CLONE (default ~/dev/nodejs/node),
@@ -49,14 +51,15 @@ ENV = dict(os.environ, NODE_REVIEW_BANK=str(BANK), PATH=f"{HERE / 'bin'}:{os.env
 
 LANES = ["rereview-asap", "rereview", "cq", "fresh", "fresh-checked", "skip"]
 LANE_OF_BUCKET = {"RE-REVIEW-ASAP": "rereview-asap", "RE-REVIEW": "rereview", "CQ-CANDIDATE": "cq"}
-STATES = ["presented", "ready", "needs-run", "stale", "preparing", "done"]
+STATES = ["presented", "ready", "needs-run", "stale", "preparing", "waiting", "done"]
 ACTIVE = {"preparing", "needs-run", "ready", "stale"}
 # Dispositions the user chose. A done entry with one of these is not prepared
 # again for the head the action covered. Automatic ones (closed, draft) don't block.
 USER_DISPOSITIONS = ("approved", "changes-requested", "commented", "labeled", "unlabeled", "skipped")
 FIELDS = ["pr", "url", "title", "author", "lane", "state", "head", "pr_head", "acted_head", "created_at",
           "prepared_at", "presented_at", "updated_at", "my_teams", "rereview_from",
-          "needs_run", "disposition", "disposition_at", "snooze_until", "lease", "note"]
+          "needs_run", "disposition", "disposition_at", "snooze_until", "lease", "note",
+          "wait_since", "wait_for"]
 SKIP_PATHS = re.compile(r"^(lib/inspector\.js|lib/internal/inspector/|src/inspector/|"
                         r"lib/diagnostics_channel\.js|lib/internal/diagnostics_channel|"
                         r"src/node_diagnostics_channel)")
@@ -282,8 +285,13 @@ def finish(e, disposition, when=None):
     if e.get("acted_head") in (None, "-"):
         e["acted_head"] = e.get("head")
     save(e)
-    shutil.rmtree(DOSSIER / str(e["pr"]), ignore_errors=True)
-    git("update-ref", "-d", f"refs/review-bank/{e['pr']}", check=False)
+    drop_inputs(e["pr"])
+
+
+def drop_inputs(n):
+    """Remove an entry's dossier and fetched ref."""
+    shutil.rmtree(DOSSIER / str(n), ignore_errors=True)
+    git("update-ref", "-d", f"refs/review-bank/{n}", check=False)
 
 
 def read_tsv(name):
@@ -357,6 +365,20 @@ def ci_at(r, head):
     return bool(r and r.get("head") and head.startswith(r["head"]))
 
 
+def landing_at(created, labels):
+    """When nodejs-contribute's Landing wait ends: 48 hours after the PR
+    opened, 72 when those hours touch a Saturday or Sunday (UTC), and none
+    with fast-track. None when the open time is unknown."""
+    t = parse_iso(created)
+    if not t:
+        return None
+    if "fast-track" in labels:
+        return t
+    end = t + timedelta(hours=48)
+    weekend = any((t.date() + timedelta(days=i)).weekday() >= 5 for i in range((end.date() - t.date()).days + 1))
+    return t + timedelta(hours=72) if weekend else end
+
+
 def refresh_cq_ci():
     """ci-status.sh for cq candidates whose cached result is missing, for
     another head, or older than CQ_CI_MAX_AGE, oldest result first, skipping
@@ -366,7 +388,8 @@ def refresh_cq_ci():
     todo = []
     for c in ranked_candidates():
         e = bank.get(c["pr"])
-        if c["lane"] != "cq" or (e and e["state"] != "done") or skip_reason(c, e):
+        held = e and e["state"] == "waiting" and "ci" in wake_conditions(e)
+        if c["lane"] != "cq" or (e and e["state"] != "done" and not held) or skip_reason(c, e):
             continue
         r = ci.get(c["pr"])
         if ci_at(r, c["head"]) and (now() - parse_iso(r["at"])).total_seconds() < CQ_CI_MAX_AGE:
@@ -399,10 +422,11 @@ def ranked_candidates():
     rr = {r[1]: r for r in read_tsv("rereview.tsv")}
     out = {}
     for r in rr.values():
-        bucket, n, _, _, last, head, approvals, mergeable, updated = r
+        bucket, n, _, _, last, head, approvals, mergeable, updated = r[:9]
         if bucket in LANE_OF_BUCKET:
             out[n] = dict(pr=n, lane=LANE_OF_BUCKET[bucket], head=head, updated=updated,
-                          rereview_from=r[3], note=f"approvals={approvals} {mergeable}")
+                          rereview_from=r[3], note=f"approvals={approvals} {mergeable}",
+                          created=r[9] if len(r) > 9 else None, labels=r[10].split(",") if len(r) > 10 else [])
     for r in read_tsv("queue.tsv"):
         n, todo, done = r[0], r[1], r[2] if len(r) > 2 else "-"
         m = meta.get(n)
@@ -435,8 +459,10 @@ def skip_reason(c, e):
         return f"{e['disposition'][:40]} since the candidate was cached"
     head = e["pr_head"] if newer and e.get("pr_head") not in (None, "-") else c["head"]
     # An action covers its head and its kind of work: an approval at a head
-    # doesn't cover the commit-queue check for that head.
-    if user and acted_head(e) == head and (e["lane"] == "cq") == (c["lane"] == "cq"):
+    # doesn't cover the commit-queue check for that head. A woken hold
+    # (wait_since set) asked for the PR back, so it doesn't cover it either.
+    woke = e.get("wait_since") not in (None, "-")
+    if user and not woke and acted_head(e) == head and (e["lane"] == "cq") == (c["lane"] == "cq"):
         return f"you acted at this head ({e['disposition'][:40]})"
     return None
 
@@ -463,19 +489,28 @@ def plan(target=TARGET, show_all=False):
                 why = r["line"] if ci_at(r, c["head"]) else "not checked at this head yet"
                 skipped.append((c, f"CI not green at head: {why}"))
                 continue
+            land = landing_at(c.get("created"), c.get("labels") or [])
+            if land and land > now():
+                skipped.append((c, f"landing wait until {iso(land)}"))
+                continue
         fresh.append(c)
     for c in (fresh if show_all else fresh[:room]):
+        e = bank.get(c["pr"])
         lines.append(f"PREPARE {c['pr']} lane={c['lane']} updated={c['updated'][:10]}"
-                     + (f"  {c.get('title', '')[:60]}" if c.get("title") else ""))
+                     + (f"  {c.get('title', '')[:60]}" if c.get("title") else "")
+                     + (f"  ({e['note']})" if e and e.get("note", "").startswith("woke:") else ""))
     if show_all:
         lines += [f"SKIP {c['pr']} lane={c['lane']} {why}" for c, why in skipped]
+        lines += [f"WAIT {e['pr']} lane={e['lane']} {describe_wait(e)}"
+                  for e in sorted(bank.values(), key=rank) if e["state"] == "waiting"]
     counts = ", ".join(f"{k} {l}" for l in LANES if (k := sum(c["lane"] == l for c in fresh)))
     return lines, counts or "none"
 
 
 SYNC_FIELDS = (
-    "number title state isDraft updatedAt closedAt headRefOid author{login} "
+    "number title state isDraft createdAt updatedAt closedAt headRefOid author{login} "
     "labels(first:50){nodes{name}} "
+    "allReviews: reviews(last:50){nodes{author{login} submittedAt}} "
     "reviews(last:30,author:\"%s\"){nodes{state submittedAt commit{oid}}} "
     "comments(last:30){nodes{author{__typename login} createdAt body}} "
     "timelineItems(last:50,itemTypes:[LABELED_EVENT,UNLABELED_EVENT]){nodes{__typename "
@@ -531,11 +566,25 @@ def sync_entry(e, d, rr):
     if d["isDraft"]:
         finish(e, "draft")
         return [f"  {n}: converted to draft"]
+    if e["state"] == "waiting":
+        # My own actions don't wake a hold; it waits on others and on time.
+        why = wake_reasons(e, d)
+        if why:
+            wake(e, why)
+            return [f"  {n}: {e['note']}"]
+        save(e)
+        return []
     acted = my_actions(d, parse_iso(e.get("created_at")) or now())
     labels = {l["name"] for l in d["labels"]["nodes"]}
     if acted:
         disp, when, reviewed = acted
         e["acted_head"] = reviewed or e.get("head")
+        # An approval at the head leaves nothing to do until the PR can land.
+        gates = landing_gates(d, n) if disp.startswith("approved") and reviewed == d["headRefOid"] else {}
+        if gates:
+            e["disposition"], e["disposition_at"] = disp, when
+            hold(e, {"reviews": "1", "push": reviewed[:12], **gates}, when, "approved; waiting until it can land")
+            return [f"  {n}: {disp}, waiting {describe_wait(e)}"]
         finish(e, disp, when)
         return [f"  {n}: {disp}"]
     # Exact label: commit-queue-squash, -rebase, and -failed don't enqueue.
@@ -583,6 +632,82 @@ def my_actions(d, since):
     # Lead with the review, if any: "approved @<sha>; labeled request-ci".
     order = sorted(acts, key=lambda a: " @" not in a[1])
     return "; ".join(dict.fromkeys(a[1] for a in order)), iso(acts[-1][0]), reviewed
+
+
+def wake_conditions(e):
+    """A waiting entry's wait_for as a dict: reviews (count), push (the head
+    it waits to move from), landing (when the landing wait ends), ci, until."""
+    return dict(t.partition("=")[::2] for t in (e.get("wait_for") or "-").split(",") if t and t != "-")
+
+
+def describe_wait(e):
+    w, parts = wake_conditions(e), []
+    if "reviews" in w:
+        parts.append(f"{w['reviews']} review(s) by others")
+    if "push" in w:
+        parts.append(f"a push past {w['push']}")
+    if "landing" in w:
+        parts.append(f"the landing wait ({w['landing']})")
+    if "ci" in w:
+        parts.append("green CI at the head")
+    if "until" in w:
+        parts.append(w["until"])
+    return f"since {e.get('wait_since')}, wakes on " + (" or ".join(parts) or "unhold only")
+
+
+def hold(e, conditions, since, note):
+    """Move an entry to waiting and drop its inputs: on wake it is planned
+    again, and others' reviews or a push make the old review stale anyway."""
+    e["state"], e["wait_since"], e["note"], e["lease"] = "waiting", since, note, "-"
+    e["wait_for"] = ",".join(f"{k}={v}" if v else k for k, v in conditions.items()) or "-"
+    save(e)
+    drop_inputs(e["pr"])
+
+
+def wake(e, why):
+    """End a hold. The entry is done, so plan puts the PR back in its lane."""
+    e["state"], e["note"] = "done", "woke: " + "; ".join(why)
+    save(e)
+
+
+def landing_gates(d, n):
+    """The landing gates still closed at the PR's head, as wake conditions:
+    the landing wait, and green CI from the cq CI cache."""
+    gates = {}
+    at = landing_at(d.get("createdAt"), {l["name"] for l in d["labels"]["nodes"]})
+    if at and at > now():
+        gates["landing"] = iso(at)
+    r = read_ci().get(n)
+    if not (ci_at(r, d["headRefOid"]) and r["ok"]):
+        gates["ci"] = ""
+    return gates
+
+
+def wake_reasons(e, d):
+    """Which of a waiting entry's wake conditions have happened."""
+    w, why, head = wake_conditions(e), [], d["headRefOid"]
+    since = parse_iso(e.get("wait_since")) or now()
+    if w.get("push") and not head.startswith(w["push"]):
+        why.append(f"new push {head[:12]}")
+    if "reviews" in w:
+        # Distinct reviewers other than me and the author, any review state.
+        who = {(r.get("author") or {}).get("login") for r in (d.get("allReviews") or {}).get("nodes", [])
+               if (parse_iso(r.get("submittedAt")) or since) > since}
+        who -= {me(), (d.get("author") or {}).get("login"), None}
+        if len(who) >= int(w["reviews"] or 1):
+            why.append(f"reviewed by {', '.join(sorted(who))}")
+    if "landing" in w:
+        # Recomputed each sync: a fast-track label can end it early.
+        at = landing_at(d.get("createdAt"), {l["name"] for l in d["labels"]["nodes"]})
+        if at and at <= now():
+            why.append("landing wait over")
+    if "ci" in w:
+        r = read_ci().get(e["pr"])
+        if ci_at(r, head) and r["ok"]:
+            why.append(f"CI green at {head[:12]}")
+    if w.get("until") and parse_iso(w["until"]) <= now():
+        why.append(f"hold until {w['until']} passed")
+    return why
 
 
 def prefetch(n):
@@ -655,10 +780,10 @@ def swap_in(n, new, tmp_ref, pr, info, head, lane, rf, cand):
             d.rename(gone)
         new.rename(d)
         e = load(n)
-        if e and e.get("state") in ("done", "stale") and e.get("body", "").strip():
+        if e and e.get("state") in ("done", "stale", "waiting") and e.get("body", "").strip():
             # Keep the earlier review for reference; the new one starts clean.
             ARCHIVE.joinpath(f"{n}-{e.get('head', '-')[:12]}.md").write_text(entry_path(n).read_text())
-        if not e or e.get("state") in ("done", "stale"):
+        if not e or e.get("state") in ("done", "stale", "waiting"):
             e = {"pr": n, "created_at": iso(now()), "disposition": "-",
                  "my_teams": (e or {}).get("my_teams")}
         e.update(url=f"https://github.com/{REPO}/pull/{n}", title=info["title"],
@@ -984,6 +1109,7 @@ def show(e, header_only=False):
           f"  prepared against {e['head'][:12]} at {e.get('prepared_at', '-')}{moved}"
           + (f"\n  teams: {e['my_teams']}" if e.get("my_teams") not in (None, "-") else "")
           + (f"\n  disposition: {e['disposition']} at {e['disposition_at']}" if e["disposition"] != "-" else "")
+          + (f"\n  waiting {describe_wait(e)}" if e["state"] == "waiting" else "")
           + (f"\n  note: {e['note']}" if e.get("note") not in (None, "-") else ""))
     if not header_only:
         print(e["body"].rstrip())
@@ -997,7 +1123,8 @@ def list_cmd(show_all, target=TARGET):
         if e["state"] == "done" and not show_all:
             continue
         snz = " (snoozed)" if snoozed(e) else ""
-        extra = f" needs-run={e['needs_run']}" if e["state"] == "needs-run" else ""
+        extra = f" needs-run={e['needs_run']}" if e["state"] == "needs-run" else \
+            f" ({describe_wait(e)})" if e["state"] == "waiting" else ""
         disp = f" -> {e['disposition']}" if e["state"] == "done" else ""
         print(f"  {e['state']:<9} {e['lane']:<13} https://github.com/{REPO}/pull/{e['pr']}{extra}{snz}{disp}  {e['title'][:60]}")
 
@@ -1087,6 +1214,53 @@ def set_cmd(n, kvs):
     show(e, header_only=True)
 
 
+def hold_cmd(n, args):
+    """Hold a PR until others review it, it gets a push, or --until passes.
+    Works for a candidate with no entry yet. No GitHub call: the push
+    condition uses the latest head the bank has seen."""
+    n, until, reviews, note = str(int(n)), None, "1", []
+    while args:
+        a = args.pop(0)
+        if a in ("--until", "--until-reviews") and not args:
+            die(f"{a} needs a value", 2)
+        if a == "--until":
+            try:
+                until = iso(parse_iso(args.pop(0)))
+            except (ValueError, TypeError):
+                die(f"--until must be an ISO time such as {iso(now())}", 2)
+        elif a == "--until-reviews":
+            reviews = args.pop(0)
+            if not reviews.isdigit():
+                die("--until-reviews must be a count, 0 for none", 2)
+        else:
+            note.append(a)
+    with entry_lock(n):
+        e = load(n)
+        if not e:
+            c = {c["pr"]: c for c in ranked_candidates()}.get(n) or \
+                die(f"#{n} is neither in the bank nor a candidate; nothing to hold")
+            e = {"pr": n, "url": f"https://github.com/{REPO}/pull/{n}", "title": c.get("title") or "-",
+                 "author": c.get("author") or "-", "lane": c["lane"], "head": c["head"], "pr_head": c["head"],
+                 "created_at": iso(now()), "updated_at": c["updated"], "my_teams": c.get("my_teams"),
+                 "rereview_from": c.get("rereview_from"), "disposition": "-"}
+        head = e["pr_head"] if e.get("pr_head") not in (None, "-") else e["head"]
+        w = {"reviews": reviews} if int(reviews) else {}
+        w["push"] = head[:12]
+        if until:
+            w["until"] = until
+        hold(e, w, iso(now()), "held" + (f": {' '.join(note)}" if note else ""))
+    show(e, header_only=True)
+
+
+def unhold_cmd(n):
+    with entry_lock(n):
+        e = load(n) or die(f"no entry for {n}")
+        if e["state"] != "waiting":
+            die(f"#{n} is {e['state']}, not waiting")
+        wake(e, ["unheld by hand"])
+    show(e, header_only=True)
+
+
 def main(argv):
     if not argv:
         print(__doc__)
@@ -1136,6 +1310,10 @@ def main(argv):
         put(args[0], args[1], hd)
     elif cmd == "set":
         set_cmd(args[0], args[1:])
+    elif cmd == "hold":
+        hold_cmd(args[0], args[1:])
+    elif cmd == "unhold":
+        unhold_cmd(args[0])
     elif cmd == "slot":
         slot_cmd(args)
     else:

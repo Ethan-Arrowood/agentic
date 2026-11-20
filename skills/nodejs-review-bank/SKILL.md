@@ -42,7 +42,7 @@ This skill builds on two others, which must be installed alongside it:
 | `archive/` | Earlier entries for a PR that came back after a new push |
 | `slots.tsv` | Slot name and checkout path, one per line |
 
-Entry front matter: `pr`, `url`, `title`, `author`, `lane`, `state`, `head` (SHA prepared against), `pr_head` (latest seen), `acted_head` (the head the user's action covered: the reviewed commit, else `head`), `created_at`, `prepared_at`, `presented_at`, `my_teams`, `rereview_from` (commit of the user's last decisive review), `needs_run` (count), `disposition`, `disposition_at`, `snooze_until`, `lease`, `note`. Edit fields only through `bank.py set`.
+Entry front matter: `pr`, `url`, `title`, `author`, `lane`, `state`, `head` (SHA prepared against), `pr_head` (latest seen), `acted_head` (the head the user's action covered: the reviewed commit, else `head`), `created_at`, `prepared_at`, `presented_at`, `my_teams`, `rereview_from` (commit of the user's last decisive review), `needs_run` (count), `disposition`, `disposition_at`, `snooze_until`, `lease`, `note`, `wait_since` and `wait_for` (see [Holds](#holds)). Edit fields only through `bank.py set`, `hold`, and `unhold`.
 
 **States:**
 
@@ -53,6 +53,7 @@ Entry front matter: `pr`, `url`, `title`, `author`, `lane`, `state`, `head` (SHA
 | `ready` | Verified and complete |
 | `presented` | Shown to the user, waiting on their action. At most one at a time. |
 | `stale` | The head moved after preparation. Re-prepared first on the next tick. |
+| `waiting` | Held until others review it, a push, the landing gates, or a time. See [Holds](#holds). |
 | `done` | The user acted, or the PR closed (`landed <sha>` when it has a "Landed in" comment), merged, became a draft, was deleted (`not-found`), or got `commit-queue` |
 
 **Lanes**, in priority order: `rereview-asap`, `rereview`, `cq`, `fresh` (one of the user's teams unchecked), `fresh-checked`, `skip` (the *Subsystem skip list*: inspector and diagnostics_channel). The first three are `rereview.py`'s RE-REVIEW-ASAP, RE-REVIEW, and CQ-CANDIDATE buckets. Within a lane, the most recently updated PR comes first.
@@ -79,6 +80,27 @@ A failed `gates.json` query or `git node metadata` run doesn't stop the prefetch
 
 A code owner team counts as reviewed only through a review made on its behalf, which GitHub records when the team was requested. "not requested" means the team was never asked or a member reviewed without the request, so check the reviewers before calling it missing. `reviewDecision: REVIEW_REQUIRED` with enough approvals usually means a code owner review is missing.
 
+### Holds
+
+A hold says "I've done my part; bring it back later". A `waiting` entry isn't planned, prepared, or presented, and doesn't count toward `BANK_TARGET`. Sync wakes it on any of its conditions, in `wait_for`:
+
+| Condition | Wakes when |
+|-----------|------------|
+| `reviews=N` | N people other than the user and the author have reviewed since `wait_since`, in any review state |
+| `push=<sha>` | The head moved from `<sha>` |
+| `landing=<time>` | The landing wait is over: 48 hours from when the PR opened, 72 when those hours touch a Saturday or Sunday (UTC), none with `fast-track` (`nodejs-contribute`, *Landing*). Recomputed each sync. |
+| `ci` | The cached `ci-status.sh` result is green at the head |
+| `until=<time>` | That time passes |
+
+The user's own actions don't wake a hold. A woken entry is `done` with the note `woke: <what woke it>`, and plan puts the PR back in its lane even at a head the user already acted on. Its `PREPARE` line carries the note. A PR that closes, becomes a draft, or is deleted while held is done as usual.
+
+Holds come from two places:
+
+- **By hand:** `bank.py hold <pr> [--until <ISO>] [--until-reviews N] [note]` waits for N reviews by others (default 1, `0` for none), a push, or `--until`. It works for a candidate with no entry yet, and for an entry in any state. It makes no GitHub call, so the push condition uses the latest head the bank has seen. It drops the dossier and ref: others' reviews or a push make the old review stale anyway. `bank.py unhold <pr>` wakes it now.
+- **By sync:** when the user approves at the head and the PR can't land yet (the landing wait isn't over, or CI isn't green at the head), sync records the approval and holds the entry on one review by others, a push, and whichever landing gates are still closed. A wake by one gate leaves the other to the `cq` lane's own check.
+
+`bank.py plan --all` lists each hold as `WAIT <pr> lane=<lane>` with its conditions.
+
 ## The tick
 
 A tick is idempotent. Run it on a loop (see [Per-tool settings](#per-tool-settings)); missing one costs nothing.
@@ -93,9 +115,9 @@ It takes a lock, so overlapping ticks exit early. Then it:
 
 - Reruns `nodejs-review-queue`'s `build-queue.sh` when the cached team queue is over `REFRESH_MINUTES` (120) old, or with `--refresh`. On 2026-11-17 that took 15 minutes (432 candidates, 99 relevant). On `INCOMPLETE`, it keeps the previous rows and adds the new ones. If the candidate metadata fetch fails, it keeps the new rows, reports it, and goes on with the tick.
 - Reruns `rereview.py --tsv` every tick (one search and a few GraphQL calls).
-- Syncs every open entry in one GraphQL batch: drops PRs that merged, closed, or became drafts, and PRs by the user. In nodejs, closed usually means landed (`nodejs-contribute`, *Landing*). Marks an entry `stale` when its head moved since preparation. Reads back the user's reviews, label changes, and comments since the entry was created, records them as the `disposition`, and marks the entry `done`. A `cq` entry is also done once anyone adds the `commit-queue` label itself (not `commit-queue-squash`, `-rebase`, or `-failed`). Each entry is re-read under its lock before it's saved, so a `put`, `present`, or `set` made during the query isn't lost. An entry prefetched again during the query is left for the next sync.
-- Checks CI with `ci-status.sh` for up to 5 `cq` candidates whose result is missing, for another head, or over 30 minutes old, oldest result first. A result counts for the head `ci-status.sh` reports.
-- Prints the bank, a count of eligible candidates per lane, and `PREPARE <pr> lane=<lane>` lines: stale entries first, then new candidates in priority order, up to `BANK_TARGET` (6) active entries. A candidate is skipped while its entry is open, or when the user already acted on its current head in the same kind of lane. The cached team queue can be up to `REFRESH_MINUTES` old, so when an entry saw the PR more recently, the entry's head and state win: a PR the bank saw land or close isn't planned again. An approval in a review lane doesn't cover the commit-queue check, so the PR can still come back as `cq`. A `cq` candidate waits until CI is green at its head. `bank.py plan --all` lists each skip with its reason.
+- Syncs every open entry in one GraphQL batch: drops PRs that merged, closed, or became drafts, and PRs by the user. In nodejs, closed usually means landed (`nodejs-contribute`, *Landing*). Marks an entry `stale` when its head moved since preparation. Reads back the user's reviews, label changes, and comments since the entry was created, records them as the `disposition`, and marks the entry `done`, or `waiting` after an approval at a head that can't land yet. It checks each `waiting` entry's wake conditions (see [Holds](#holds)). A `cq` entry is also done once anyone adds the `commit-queue` label itself (not `commit-queue-squash`, `-rebase`, or `-failed`). Each entry is re-read under its lock before it's saved, so a `put`, `present`, or `set` made during the query isn't lost. An entry prefetched again during the query is left for the next sync.
+- Checks CI with `ci-status.sh` for up to 5 `cq` candidates (with no open entry, or held on `ci`) whose result is missing, for another head, or over 30 minutes old, oldest result first. A result counts for the head `ci-status.sh` reports.
+- Prints the bank, a count of eligible candidates per lane, and `PREPARE <pr> lane=<lane>` lines: stale entries first, then new candidates in priority order, up to `BANK_TARGET` (6) active entries. A candidate is skipped while its entry is open, or when the user already acted on its current head in the same kind of lane. The cached team queue can be up to `REFRESH_MINUTES` old, so when an entry saw the PR more recently, the entry's head and state win: a PR the bank saw land or close isn't planned again. An approval in a review lane doesn't cover the commit-queue check, so the PR can still come back as `cq`. A `cq` candidate waits until CI is green at its head and the landing wait is over (see [Holds](#holds)). A held PR isn't planned. `bank.py plan --all` lists each skip with its reason, and each hold.
 
 ### 2. Prepare each planned PR
 
@@ -237,7 +259,7 @@ When the user says they're ready ("next review", "show me the bank"):
 1. Run `bank.py sync`, then `bank.py present`. It marks the top `ready` entry (or `needs-run` if none are ready) as presented and prints it. Snoozed entries wait. Present the summary, with the PR's full URL.
 2. Stop and wait, exactly as `nodejs-review-queue`'s *Stop and wait*. Outlines and proofreading follow that skill's step 2.
 3. When the user says they're done with it, run `bank.py sync <pr>`. If it finds their action, the entry is done. Report the recorded disposition and present the next one.
-4. If GitHub shows no action yet, say so and ask: they may not have submitted, or chose to skip. Record their answer: `bank.py set <pr> state=done disposition=skipped`, or `bank.py set <pr> state=ready snooze_until=<ISO time>` for later.
+4. If GitHub shows no action yet, say so and ask: they may not have submitted, or chose to skip. Record their answer: `bank.py set <pr> state=done disposition=skipped`, `bank.py set <pr> state=ready snooze_until=<ISO time>` for later, or `bank.py hold <pr> [--until-reviews N] [note]` to wait for others (see [Holds](#holds)).
 
 The loop keeps running meanwhile. While an entry is presented, a tick reports in one line at most, and never presents.
 

@@ -356,6 +356,24 @@ class BankTest(unittest.TestCase):
             self.assertEqual(p.returncode, 5, state)
             self.assertEqual(self.entry(5)["state"], state)
 
+    def test_put_counts_needs_a_run_and_takes_no_state_override(self):
+        self.write_entry(5, state="preparing", head=A, pr_head=A, lease=ago(minutes=1))
+        summary = self.tmp / "s.md"
+        summary.write_text("## Summary\n### Needs a run\n- test/parallel/test-foo.js: fails on main\n")
+        self.run_bank("put", "5", str(summary), "--head", A, "--state", "ready")
+        e = self.entry(5)
+        self.assertEqual(e["state"], "needs-run")
+        self.assertEqual(e["needs_run"], "1")
+
+    def test_plan_counts_eligible_candidates_per_lane(self):
+        self.candidate_cache(6)
+        self.cache("rereview.tsv", self.rereview_row(5, bucket="RE-REVIEW"))
+        out = self.run_bank("plan").stdout
+        self.assertIn("plan: eligible candidates by lane: 1 rereview, 1 fresh", out)
+        self.write_entry(5, state="ready")
+        self.write_entry(6, state="ready")
+        self.assertIn("plan: eligible candidates by lane: none", self.run_bank("plan").stdout)
+
     def candidate_cache(self, n, head=A, updated=None, state="OPEN"):
         self.cache("queue.tsv", f"{n}\thttp\t-\n")
         self.cache("candidates.json", json.dumps({str(n): {

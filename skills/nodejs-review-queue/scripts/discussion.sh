@@ -6,7 +6,7 @@
 # --json prints one JSON object instead, for the nodejs-review-bank dossier:
 # reviews, comments, and threads (each item has author, at, status
 # active|resolved-context, and body), excluded (kind, author, why, where),
-# block_check (ok, unavailable, or off), and truncated (lists over 100).
+# block_check (ok, unknown, unavailable, or off), and truncated (lists over 100).
 #
 # Reads through GraphQL, because only GraphQL exposes isMinimized and
 # minimizedReason. `gh pr view --json reviews,comments` and the REST endpoints
@@ -18,6 +18,7 @@
 # content, and resolved inline threads. A summary line lists what was dropped.
 #
 # The block check needs org moderation rights (204 = blocked, 404 = not).
+# REPO (default nodejs/node) sets the repository and the org checked.
 # Without them it errors, and the script skips it. BLOCKS=0 turns it off.
 # Fetches the first 100 of each list, which covers nearly every PR. A
 # warning prints when a list has more.
@@ -25,12 +26,13 @@ source "${0:A:h}/lib.sh"
 mode=text; [[ ${1:-} == --json ]] && { mode=json; shift; }
 n=${1:?usage: discussion.sh [--json] <pr>}
 
-q='query($n:Int!){repository(owner:"nodejs",name:"node"){pullRequest(number:$n){
+q='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){
   reviews(first:100){totalCount nodes{author{login} authorAssociation state submittedAt commit{oid} isMinimized minimizedReason body}}
   comments(first:100){totalCount nodes{author{login} authorAssociation createdAt isMinimized minimizedReason body}}
   reviewThreads(first:100){totalCount nodes{isResolved isOutdated path line
-    comments(first:50){nodes{author{login} createdAt isMinimized minimizedReason body}}}}}}}'
-json=$(gh_retry gh api graphql -F n="$n" -f query="$q") || { echo "discussion.sh: GraphQL query failed" >&2; exit 1; }
+    comments(first:50){nodes{author{login} authorAssociation createdAt isMinimized minimizedReason body}}}}}}}'
+json=$(gh_retry gh api graphql -F n="$n" -f o="${REPO%%/*}" -f r="${REPO#*/}" -f query="$q") ||
+  { echo "discussion.sh: GraphQL query failed" >&2; exit 1; }
 pr='.data.repository.pullRequest'
 
 truncated=()
@@ -40,17 +42,20 @@ for list in reviews comments reviewThreads; do
 done
 
 # Logins to drop because the org blocked them. Bots and members are skipped.
+# An empty status (a transport or shim failure) leaves that login unchecked,
+# and block_check says unknown instead of ok.
 blocked=()
 block_check=off
 if [[ ${BLOCKS:-1} = 1 ]]; then
   block_check=ok
-  for u in $(print -r -- "$json" | jq -r "[$pr.reviews.nodes[], $pr.comments.nodes[]
+  for u in $(print -r -- "$json" | jq -r "[$pr.reviews.nodes[], $pr.comments.nodes[], $pr.reviewThreads.nodes[].comments.nodes[]
       | select(.authorAssociation | IN(\"NONE\",\"FIRST_TIMER\",\"FIRST_TIME_CONTRIBUTOR\",\"CONTRIBUTOR\"))
-      | .author.login] + [$pr.reviewThreads.nodes[].comments.nodes[].author.login] | unique[]"); do
-    code=$(gh api -i "orgs/nodejs/blocks/$u" 2>/dev/null | head -1 | awk '{print $2}')
+      | .author.login] | unique[]"); do
+    code=$(gh api -i "orgs/${REPO%%/*}/blocks/$u" 2>/dev/null | head -1 | awk '{print $2}')
     case $code in
       204) blocked+=$u ;;
-      404|'') ;;
+      404) ;;
+      '') block_check=unknown; echo "note: block check for $u failed; not checked" >&2 ;;
       *) block_check=unavailable; echo "note: org block check unavailable (HTTP $code); skipping it" >&2; break ;;
     esac
     sleep 1

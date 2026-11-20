@@ -4,7 +4,7 @@ Each test gets a temporary bank, a fake gh on PATH (fake_gh.py), stub
 sibling scripts, and, where needed, a temporary git clone with an upstream.
 Nothing here touches the network or the real bank.
 """
-import json, os, shutil, subprocess, sys, tempfile, time, unittest
+import fcntl, json, os, shutil, subprocess, sys, tempfile, time, unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -57,7 +57,7 @@ class BankTest(unittest.TestCase):
         self.nc = self.tmp / "nc"
         self.nc.mkdir()
         (self.nc / "ci-status.sh").write_text(
-            '#!/bin/zsh\necho "#$1: ${FAKE_CI:-CI=SUCCESS  job=1  HEAD-MATCH}"\n')
+            '#!/bin/zsh\necho "#$1: ${FAKE_CI:-CI=SUCCESS  job=1  HEAD-MATCH}  [head ${FAKE_CI_HEAD:-aaaaaaaaaaaa}]"\n')
         for p in (self.rq / "build-queue.sh", self.nc / "ci-status.sh"):
             p.chmod(0o755)
         self.env = dict(os.environ, NODE_REVIEW_BANK=str(self.bank), FAKE_GH_DIR=str(self.fake),
@@ -71,7 +71,6 @@ class BankTest(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    # ------------------------------------------------------------ helpers
 
     def rules(self, rules):
         (self.fake / "rules.json").write_text(json.dumps(rules))
@@ -113,7 +112,6 @@ class BankTest(unittest.TestCase):
         rule.update(extra)
         return rule
 
-    # ------------------------------------------------------------ sync
 
     def test_sync_does_not_clobber_a_concurrent_put(self):
         self.write_entry(5, state="preparing", lease=ago(minutes=5))
@@ -127,7 +125,7 @@ class BankTest(unittest.TestCase):
             time.sleep(0.1)
         summary = self.tmp / "summary.md"
         summary.write_text("## Summary\nverified\n")
-        self.run_bank("put", "5", str(summary))
+        self.run_bank("put", "5", str(summary), "--head", A)
         gate.write_text("")
         out, err = sync.communicate(timeout=60)
         self.assertEqual(sync.returncode, 0, err)
@@ -166,7 +164,6 @@ class BankTest(unittest.TestCase):
         out = self.run_bank("plan").stdout
         self.assertIn("PREPARE 5 lane=rereview", out)
 
-    # ------------------------------------------------------------ plan
 
     def test_an_approval_does_not_keep_a_pr_out_of_the_cq_lane(self):
         self.write_entry(5, state="done", lane="rereview", head=A, pr_head=A, acted_head=A,
@@ -189,14 +186,15 @@ class BankTest(unittest.TestCase):
         self.cache("rereview.tsv", f"RE-REVIEW-ASAP\t5\tCHANGES_REQUESTED\t{C}\t{C}\t{A}\t0\tMERGEABLE\t{ago(minutes=1)}\n")
         self.assertNotIn("PREPARE 5", self.run_bank("plan").stdout)
 
-    # ------------------------------------------------------------ tick
 
-    def test_queue_stamp_waits_for_candidate_metadata(self):
+    def test_a_metadata_failure_keeps_the_queue_and_finishes_the_tick(self):
         self.queue_out.write_text("5\thttp\t-\n")
         self.rules([{"match": ["graphql", "files(first:100)"], "rc": 1, "stderr": "boom"}])
-        p = self.run_bank("tick", "--refresh", check=False)
-        self.assertNotEqual(p.returncode, 0)
+        out = self.run_bank("tick", "--refresh").stdout
+        self.assertIn("metadata FAILED", out)
+        self.assertIn("plan:", out)
         self.assertFalse((self.bank / "cache" / "queue.stamp").exists())
+        self.assertIn("5\thttp", (self.bank / "cache" / "queue.tsv").read_text())
 
     def test_an_ownerless_tick_lock_does_not_block_ticks(self):
         (self.bank / "locks" / "tick").mkdir(parents=True)
@@ -215,7 +213,6 @@ class BankTest(unittest.TestCase):
         except subprocess.TimeoutExpired:
             self.fail("gh hung on a lock directory with no owner")
 
-    # ------------------------------------------------------------ set / present
 
     def test_set_rejects_bad_values(self):
         self.write_entry(5)
@@ -231,7 +228,6 @@ class BankTest(unittest.TestCase):
         self.assertEqual(p.returncode, 3, p.stdout + p.stderr)
         self.assertEqual(self.entry(5)["state"], "ready")
 
-    # ------------------------------------------------------------ prefetch
 
     def make_clone(self, pr_head_commit_msg="pr"):
         """A clone whose upstream has main and refs/pull/5/head. Returns the PR head sha."""
@@ -262,7 +258,8 @@ class BankTest(unittest.TestCase):
               "headRefOid": head, "reviewDecision": "", "labels": [], "mergeable": "MERGEABLE",
               "mergeStateStatus": "BLOCKED", "files": [], "commits": [], "createdAt": ago(days=3),
               "updatedAt": ago(minutes=5), "isDraft": False, "state": "OPEN"}
-        return [{"match": ["pr", "view", "5"], "stdout": pr},
+        return [{"match": ["pr", "view", "5", "--jq"], "stdout": head + "\n"},
+                {"match": ["pr", "view", "5"], "stdout": pr},
                 {"match": ["pr", "diff", "5"], "stdout": "diff --git a/f b/f\n"},
                 {"match": ["graphql", "reviewThreads"], "stdout": disc}]
 
@@ -298,7 +295,6 @@ class BankTest(unittest.TestCase):
                              text=True, stdout=subprocess.PIPE).stdout.strip()
         self.assertEqual(ref, old_ref)
 
-    # ------------------------------------------------------------ slots
 
     def make_slots(self, *names):
         rows = []
@@ -326,6 +322,206 @@ class BankTest(unittest.TestCase):
         p = self.run_bank("slot", "acquire", "any", "5", check=False)
         self.assertEqual(p.returncode, 3, p.stdout + p.stderr)
 
+
+    def rereview_row(self, n, bucket="CQ-CANDIDATE", head=A, updated=None):
+        return f"{bucket}\t{n}\tAPPROVED\t{head}\t{head}\t{head}\t2\tMERGEABLE\t{updated or ago(minutes=1)}\n"
+
+    def test_an_approval_recorded_by_sync_still_reaches_the_cq_lane(self):
+        # The same tick's rereview.tsv already says CQ-CANDIDATE when sync
+        # records the approval.
+        self.write_entry(5, state="presented", lane="rereview", head=A, pr_head=A, created_at=ago(hours=2))
+        self.cache("rereview.tsv", self.rereview_row(5))
+        self.cache("ci.json", json.dumps({"5": {"head": A[:12], "ok": True, "line": "CI=SUCCESS HEAD-MATCH", "at": ago(minutes=1)}}))
+        self.rules([self.sync_rule(pr_node(5, A, reviews=[
+            {"state": "APPROVED", "submittedAt": ago(minutes=10), "commit": {"oid": A}}]))])
+        self.run_bank("sync")
+        self.assertEqual(self.entry(5)["state"], "done")
+        self.assertIn("PREPARE 5 lane=cq", self.run_bank("plan").stdout)
+
+    def test_put_refuses_a_draft_for_another_head(self):
+        self.write_entry(5, state="preparing", head=B, pr_head=B, lease=ago(minutes=1))
+        summary = self.tmp / "s.md"
+        summary.write_text("## late draft\n")
+        p = self.run_bank("put", "5", str(summary), "--head", A, check=False)
+        self.assertEqual(p.returncode, 5, p.stdout + p.stderr)
+        self.assertEqual(self.entry(5)["state"], "preparing")
+        self.assertNotIn("late draft", self.entry(5)["body"])
+
+    def test_put_refuses_an_entry_that_is_no_longer_being_prepared(self):
+        summary = self.tmp / "s.md"
+        summary.write_text("## late draft\n")
+        for state in ("done", "presented"):
+            self.write_entry(5, state=state, head=A, pr_head=A)
+            p = self.run_bank("put", "5", str(summary), "--head", A, check=False)
+            self.assertEqual(p.returncode, 5, state)
+            self.assertEqual(self.entry(5)["state"], state)
+
+    def candidate_cache(self, n, head=A, updated=None, state="OPEN"):
+        self.cache("queue.tsv", f"{n}\thttp\t-\n")
+        self.cache("candidates.json", json.dumps({str(n): {
+            "title": f"PR {n}", "draft": False, "state": state, "updated": updated or ago(hours=1),
+            "head": head, "author": "someone", "paths": ["lib/net.js"]}}))
+
+    def test_a_pr_closed_since_the_queue_was_cached_is_not_planned(self):
+        self.candidate_cache(5)
+        self.write_entry(5, state="done", lane="fresh", disposition="landed 42800b60d33f",
+                         disposition_at=ago(minutes=5), updated_at=ago(minutes=5))
+        out = self.run_bank("plan", "--all").stdout
+        self.assertNotIn("PREPARE 5", out)
+        self.assertIn("SKIP 5", out)
+
+    def test_an_action_newer_than_the_queue_cache_is_honored(self):
+        self.candidate_cache(5, head=A)
+        self.write_entry(5, state="done", lane="fresh", head=B, pr_head=B, acted_head=B,
+                         disposition=f"approved @{B[:12]}", disposition_at=ago(minutes=5), updated_at=ago(minutes=5))
+        self.assertNotIn("PREPARE 5", self.run_bank("plan").stdout)
+
+    def test_prefetch_refuses_a_closed_pr(self):
+        head = self.make_clone()
+        self.cache("release-lines.txt", "active release lines: v22 v24 v26\n")
+        rules = self.prefetch_rules(head)
+        for r in rules:
+            if r["match"] == ["pr", "view", "5"]:
+                r["stdout"]["state"] = "CLOSED"
+        self.rules(rules)
+        p = self.run_bank("prefetch", "5", check=False)
+        self.assertEqual(p.returncode, 4, p.stdout + p.stderr)
+        self.assertFalse((self.bank / "prs" / "5.md").exists())
+
+    def test_a_commit_queue_failed_label_does_not_finish_a_cq_entry(self):
+        self.write_entry(5, state="ready", lane="cq")
+        self.rules([self.sync_rule(pr_node(5, A, labels=["commit-queue-failed", "commit-queue-squash"]))])
+        self.run_bank("sync")
+        self.assertEqual(self.entry(5)["state"], "ready")
+
+    def test_cq_ci_checks_the_oldest_result_first(self):
+        rows = "".join(self.rereview_row(n, updated=ago(minutes=n)) for n in range(1, 7))
+        self.rereview_out.write_text(rows)
+        self.cache("queue.stamp", ago(minutes=1))
+        stale = {str(n): {"head": A[:12], "ok": False, "line": "CI=NO-RUN", "at": ago(hours=2)} for n in range(1, 6)}
+        self.cache("ci.json", json.dumps(stale))
+        self.run_bank("tick")
+        ci = json.loads((self.bank / "cache" / "ci.json").read_text())
+        self.assertIn("6", ci, "the never-checked candidate waited behind higher-ranked ones")
+
+    def test_ci_is_keyed_by_the_head_ci_status_reports(self):
+        self.rereview_out.write_text(self.rereview_row(5))
+        self.cache("queue.stamp", ago(minutes=1))
+        env = dict(self.env, FAKE_CI_HEAD="b" * 12)
+        out = self.run_bank("tick", env=env).stdout
+        self.assertNotIn("PREPARE 5", out)
+
+    def test_prefetch_aborts_when_the_head_moves_during_the_fetch(self):
+        head = self.make_clone()
+        clone = self.tmp / "clone"
+        subprocess.run(["git", "-C", str(clone), "update-ref", "refs/review-bank/5", "upstream/main"], check=True)
+        old_ref = subprocess.run(["git", "-C", str(clone), "rev-parse", "refs/review-bank/5"],
+                                 text=True, stdout=subprocess.PIPE).stdout.strip()
+        d = self.bank / "dossier" / "5"
+        d.mkdir(parents=True)
+        (d / "pr.json").write_text("OLD")
+        self.cache("release-lines.txt", "active release lines: v22 v24 v26\n")
+        rules = self.prefetch_rules(head)
+        rules[0]["stdout"] = C + "\n"  # a push landed after the fetch
+        self.rules(rules)
+        p = self.run_bank("prefetch", "5", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertEqual((d / "pr.json").read_text(), "OLD")
+        ref = subprocess.run(["git", "-C", str(clone), "rev-parse", "refs/review-bank/5"],
+                             text=True, stdout=subprocess.PIPE).stdout.strip()
+        self.assertEqual(ref, old_ref)
+        self.assertFalse((self.bank / "prs" / "5.md").exists())
+
+    def test_present_rechecks_the_entry_after_waiting_for_its_lock(self):
+        self.write_entry(5, state="ready")
+        (self.bank / "locks").mkdir(parents=True, exist_ok=True)
+        fd = os.open(self.bank / "locks" / "entry-5.lock", os.O_CREAT | os.O_RDWR)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            pres = subprocess.Popen([sys.executable, str(BANK_PY), "present"], env=self.env, text=True,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            time.sleep(1.5)
+            self.write_entry(5, state="done", disposition="skipped", disposition_at=ago(minutes=0))
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+        pres.communicate(timeout=30)
+        self.assertNotEqual(pres.returncode, 0)
+        self.assertEqual(self.entry(5)["state"], "done")
+
+    def test_a_snooze_time_without_a_zone_does_not_crash(self):
+        self.write_entry(5)
+        self.run_bank("set", "5", "snooze_until=2099-12-01T12:00:00")
+        self.assertIn("(snoozed)", self.run_bank("list").stdout)
+        self.assertEqual(self.run_bank("present", check=False).returncode, 3)
+
+    def test_slot_release_checks_the_pr_and_removes_leftovers(self):
+        self.make_slots("1")
+        self.run_bank("slot", "acquire", "1", "6")
+        p = self.run_bank("slot", "release", "1", "5", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertTrue((self.bank / "locks" / "slot-1" / "owner.json").exists())
+        self.run_bank("slot", "release", "1", "6")
+        self.assertFalse((self.bank / "locks" / "slot-1").exists())
+        lock = self.bank / "locks" / "slot-1"
+        lock.mkdir()
+        (lock / ".owner.json.x.tmp").write_text("")
+        self.run_bank("slot", "release", "1", "--force")
+        self.assertFalse(lock.exists())
+
+    def test_set_done_cleans_up_the_dossier(self):
+        self.write_entry(5, state="ready")
+        d = self.bank / "dossier" / "5"
+        d.mkdir(parents=True)
+        (d / "pr.json").write_text("{}")
+        self.run_bank("set", "5", "state=done", "disposition=skipped", f"disposition_at={ago(minutes=1)}")
+        self.assertFalse(d.exists())
+
+    def test_sync_skips_an_entry_reprepared_during_the_query(self):
+        self.write_entry(5, state="preparing", head=A, pr_head=A, lease=ago(minutes=5))
+        gate = self.tmp / "gate"
+        self.rules([self.sync_rule(pr_node(5, A), wait_file=str(gate))])
+        sync = subprocess.Popen([sys.executable, str(BANK_PY), "sync"], env=self.env, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        for _ in range(200):
+            if Path(str(gate) + ".reached").exists():
+                break
+            time.sleep(0.1)
+        self.write_entry(5, state="preparing", head=B, pr_head=B, lease=ago(minutes=0))
+        gate.write_text("")
+        sync.communicate(timeout=60)
+        self.assertEqual(self.entry(5)["pr_head"], B)
+
+    def run_discussion(self, nodes, env=None):
+        disc = {"data": {"repository": {"pullRequest": {
+            "reviews": {"totalCount": 0, "nodes": []},
+            "comments": {"totalCount": 0, "nodes": []},
+            "reviewThreads": {"totalCount": 1, "nodes": [{
+                "isResolved": False, "isOutdated": False, "path": "lib/net.js", "line": 1,
+                "comments": {"nodes": nodes}}]}}}}}
+        self.rules([{"match": ["graphql", "reviewThreads"], "stdout": disc}])
+        p = subprocess.run(["zsh", str(RQ_REAL / "discussion.sh"), "--json", "5"], env=env or self.env,
+                           text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return json.loads(p.stdout)
+
+    def comment(self, login, assoc):
+        return {"author": {"login": login}, "authorAssociation": assoc, "createdAt": ago(minutes=5),
+                "isMinimized": False, "minimizedReason": None, "body": "hi"}
+
+    def test_discussion_reports_a_failed_block_lookup_as_unknown(self):
+        out = self.run_discussion([self.comment("drive-by", "NONE")])
+        self.assertEqual(out["block_check"], "unknown")
+
+    def test_discussion_does_not_probe_members_in_threads(self):
+        self.run_discussion([self.comment("collaborator", "MEMBER")])
+        self.assertFalse([c for c in self.calls() if any("blocks/" in a for a in c)])
+
+    def test_discussion_reads_the_repo_from_REPO(self):
+        self.run_discussion([], env=dict(self.env, REPO="someorg/somerepo"))
+        q = [c for c in self.calls() if "graphql" in c][0]
+        self.assertIn("o=someorg", q)
+        self.assertIn("r=somerepo", q)
 
 if __name__ == "__main__":
     unittest.main()

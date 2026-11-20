@@ -12,9 +12,9 @@ rate limit. Read-only on GitHub: nothing here posts, labels, or reviews.
   bank.py show <pr>                       one entry
   bank.py present                         mark the top ready entry presented, show it
   bank.py prefetch <pr>                   fetch the PR's dossier and claim the entry
-  bank.py put <pr> <summary.md>           bank a verified summary (ready or needs-run)
+  bank.py put <pr> <summary.md> [--head <sha>]   bank a verified summary (ready or needs-run)
   bank.py set <pr> key=value...           edit entry fields (state=done disposition=skipped)
-  bank.py slot status|acquire <slot|any> <pr> [owner]|release <slot> [--force]
+  bank.py slot status|acquire <slot|any> <pr> [owner]|release <slot> <pr>|release <slot> --force
 
 Env: NODE_REVIEW_BANK (bank dir), NODE_CLONE (default ~/dev/nodejs/node),
 REPO, ME, BANK_TARGET (default 6), REFRESH_MINUTES (default 120),
@@ -36,9 +36,9 @@ TARGET = int(os.environ.get("BANK_TARGET", "6"))
 REFRESH_MIN = int(os.environ.get("REFRESH_MINUTES", "120"))
 LEASE_MIN = int(os.environ.get("LEASE_MINUTES", "120"))
 RETRY_SLEEP = float(os.environ.get("GH_RETRY_SLEEP", "60"))
-CQ_CI_MAX_AGE = 30 * 60      # recheck a cq candidate's CI after this many seconds
-CQ_CI_PER_TICK = 5           # at most this many ci-status.sh runs per tick
-SLOT_OWNERLESS_GRACE = 60    # a slot lock dir with no owner record is reclaimed after this
+CQ_CI_MAX_AGE = 30 * 60
+CQ_CI_PER_TICK = 5
+SLOT_OWNERLESS_GRACE = 60
 
 PRS, DOSSIER, CACHE, LOCKS, ARCHIVE = (BANK / d for d in ("prs", "dossier", "cache", "locks", "archive"))
 for d in (PRS, DOSSIER, CACHE, LOCKS, ARCHIVE):
@@ -70,9 +70,11 @@ def iso(dt):
 
 
 def parse_iso(s):
+    """An aware datetime. A time without a zone is taken as UTC."""
     if not s or s == "-":
         return None
-    return datetime.fromisoformat(s.strip().replace("Z", "+00:00"))
+    dt = datetime.fromisoformat(s.strip().replace("Z", "+00:00"))
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 def die(msg, code=1):
@@ -146,8 +148,6 @@ def git(*args, check=True):
     return p.stdout
 
 
-# ---------------------------------------------------------------- locks
-
 class Flock:
     """A lock held for the life of this process. The kernel drops it when the
     holder exits, so a crash can't leave it stuck."""
@@ -216,14 +216,9 @@ class SlotLock:
         return True
 
     def release(self):
-        (self.path / "owner.json").unlink(missing_ok=True)
-        try:
-            self.path.rmdir()
-        except OSError:
-            pass
+        # rmtree, not rmdir: a crash during acquire can leave a temp file.
+        shutil.rmtree(self.path, ignore_errors=True)
 
-
-# ---------------------------------------------------------------- entries
 
 def entry_path(n):
     return PRS / f"{n}.md"
@@ -290,8 +285,6 @@ def finish(e, disposition, when=None):
     git("update-ref", "-d", f"refs/review-bank/{e['pr']}", check=False)
 
 
-# ---------------------------------------------------------------- candidates
-
 def read_tsv(name):
     p = CACHE / name
     if not p.exists():
@@ -301,8 +294,9 @@ def read_tsv(name):
 
 def refresh_queue():
     """Team-routed queue via build-queue.sh. On INCOMPLETE, keep the old rows
-    and add the new ones, so a partial run never shrinks the queue. The stamp
-    is written last, so a failed metadata fetch is retried on the next tick."""
+    and add the new ones, so a partial run never shrinks the queue. The rows
+    are kept even when the metadata fetch fails, and the tick goes on. The
+    stamp is written only after both succeed, so the next tick retries."""
     p = subprocess.run(["zsh", str(RQ / "build-queue.sh")], env=ENV, text=True,
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     (CACHE / "queue.log").write_text(p.stderr)
@@ -314,8 +308,11 @@ def refresh_queue():
         status = "INCOMPLETE (" + (p.stderr.strip().splitlines() or ["?"])[-1] + "); kept previous rows"
     else:
         status = f"{len(rows)} PRs"
-    fetch_meta([int(n) for n in rows])
     write_atomic(CACHE / "queue.tsv", "".join(f"{l}\n" for l in rows.values()))
+    try:
+        fetch_meta([int(n) for n in rows])
+    except RuntimeError as err:
+        return f"{status}; candidate metadata FAILED ({str(err)[:120]}), kept the previous metadata"
     if p.returncode == 0:
         (CACHE / "queue.stamp").write_text(iso(now()))
     return status
@@ -354,24 +351,37 @@ def read_ci():
     return json.loads(p.read_text()) if p.exists() else {}
 
 
+def ci_at(r, head):
+    """Whether a cached ci-status.sh result is for this head."""
+    return bool(r and r.get("head") and head.startswith(r["head"]))
+
+
 def refresh_cq_ci():
-    """ci-status.sh for cq candidates whose cached result is missing, for an
-    older head, or older than CQ_CI_MAX_AGE. plan reads the cache."""
-    ci, ran = read_ci(), 0
+    """ci-status.sh for cq candidates whose cached result is missing, for
+    another head, or older than CQ_CI_MAX_AGE, oldest result first, skipping
+    candidates plan would skip anyway. plan reads the cache. A result is keyed
+    by the head ci-status.sh reports, which can differ from the candidate's."""
+    ci, ran, bank = read_ci(), 0, {e["pr"]: e for e in entries()}
+    todo = []
     for c in ranked_candidates():
-        if c["lane"] != "cq" or ran >= CQ_CI_PER_TICK:
+        e = bank.get(c["pr"])
+        if c["lane"] != "cq" or (e and e["state"] != "done") or skip_reason(c, e):
             continue
         r = ci.get(c["pr"])
-        if r and r["head"] == c["head"] and (now() - parse_iso(r["at"])).total_seconds() < CQ_CI_MAX_AGE:
+        if ci_at(r, c["head"]) and (now() - parse_iso(r["at"])).total_seconds() < CQ_CI_MAX_AGE:
             continue
+        todo.append(c)
+    todo.sort(key=lambda c: (ci.get(c["pr"]) or {}).get("at", ""))
+    for c in todo[:CQ_CI_PER_TICK]:
         p = subprocess.run([str(NC / "ci-status.sh"), c["pr"]], env=ENV, text=True,
                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         line = (p.stdout.strip().splitlines() or ["no output"])[0]
-        ci[c["pr"]] = {"head": c["head"], "ok": "CI=SUCCESS" in line and "HEAD-MATCH" in line,
-                       "line": line, "at": iso(now())}
+        m = re.search(r"\[head ([0-9a-f]{7,40})\]", line)
+        ci[c["pr"]] = {"head": m.group(1) if m else "", "line": line, "at": iso(now()),
+                       "ok": "CI=SUCCESS" in line and "HEAD-MATCH" in line}
         ran += 1
     write_atomic(CACHE / "ci.json", json.dumps(ci))
-    return f"{ran} cq candidate(s) checked"
+    return f"{ran} cq candidate(s) checked" + (f", {len(todo) - ran} waiting" if len(todo) > ran else "")
 
 
 def is_skip(title, paths):
@@ -411,6 +421,25 @@ def ranked_candidates():
     return sorted(out.values(), key=lambda c: (LANES.index(c["lane"]), -parse_iso(c["updated"]).timestamp()))
 
 
+def skip_reason(c, e):
+    """Why plan won't prepare candidate c for its done entry e, apart from
+    CI, or None. The cached candidate can be up to REFRESH_MINUTES old, so
+    when the entry saw the PR later, its state and head win."""
+    if not e or e["state"] != "done":
+        return None
+    epoch = datetime.fromtimestamp(0, timezone.utc)
+    newer = (parse_iso(e.get("updated_at")) or epoch) > (parse_iso(c.get("updated")) or epoch)
+    user = e["disposition"].startswith(USER_DISPOSITIONS)
+    if newer and not user and e["disposition"] != "-":
+        return f"{e['disposition'][:40]} since the candidate was cached"
+    head = e["pr_head"] if newer and e.get("pr_head") not in (None, "-") else c["head"]
+    # An action covers its head and its kind of work: an approval at a head
+    # doesn't cover the commit-queue check for that head.
+    if user and acted_head(e) == head and (e["lane"] == "cq") == (c["lane"] == "cq"):
+        return f"you acted at this head ({e['disposition'][:40]})"
+    return None
+
+
 def plan(target=TARGET, show_all=False):
     bank = {e["pr"]: e for e in entries()}
     ci = read_ci()
@@ -423,16 +452,14 @@ def plan(target=TARGET, show_all=False):
         e = bank.get(c["pr"])
         if e and e["state"] != "done":
             continue
-        # An action covers its head and its kind of work: an approval at a
-        # head doesn't cover the commit-queue check for that head.
-        if (e and e["disposition"].startswith(USER_DISPOSITIONS) and acted_head(e) == c["head"]
-                and (e["lane"] == "cq") == (c["lane"] == "cq")):
-            skipped.append((c, f"you acted at this head ({e['disposition'][:40]})"))
+        why = skip_reason(c, e)
+        if why:
+            skipped.append((c, why))
             continue
         if c["lane"] == "cq":
             r = ci.get(c["pr"])
-            if not r or r["head"] != c["head"] or not r["ok"]:
-                why = r["line"] if r and r["head"] == c["head"] else "not checked at this head yet"
+            if not ci_at(r, c["head"]) or not r["ok"]:
+                why = r["line"] if ci_at(r, c["head"]) else "not checked at this head yet"
                 skipped.append((c, f"CI not green at head: {why}"))
                 continue
         fresh.append(c)
@@ -443,8 +470,6 @@ def plan(target=TARGET, show_all=False):
         lines += [f"SKIP {c['pr']} lane={c['lane']} {why}" for c, why in skipped]
     return lines, len(fresh)
 
-
-# ---------------------------------------------------------------- sync
 
 SYNC_FIELDS = (
     "number title state isDraft updatedAt closedAt headRefOid author{login} "
@@ -458,7 +483,8 @@ LANDED = re.compile(r"^\s*Landed in ([0-9a-f]{7,40})", re.M)
 
 
 def sync(only=None):
-    nums = [e["pr"] for e in entries() if e["state"] != "done" and (not only or e["pr"] in only)]
+    heads = {e["pr"]: e["head"] for e in entries() if e["state"] != "done" and (not only or e["pr"] in only)}
+    nums = list(heads)
     if not nums:
         return ["sync: no open entries"]
     rr = {r[1]: r for r in read_tsv("rereview.tsv")}
@@ -475,6 +501,10 @@ def sync(only=None):
             e = load(n)
             if not e or e["state"] == "done":
                 continue
+            if e["head"] != heads[n]:
+                # Re-prefetched while the query ran: the snapshot predates it.
+                log.append(f"  {n}: re-prepared during sync, skipped until the next one")
+                continue
             log += sync_entry(e, data.get(n), rr)
     return log or ["sync: no changes"]
 
@@ -485,8 +515,6 @@ def sync_entry(e, d, rr):
         finish(e, "not-found")
         return [f"  {n}: not found on GitHub (deleted?)"]
     e["title"], e["updated_at"], e["pr_head"] = d["title"], d["updatedAt"], d["headRefOid"]
-    if n in rr and rr[n][0] in LANE_OF_BUCKET:
-        e["lane"] = LANE_OF_BUCKET[rr[n][0]]
     author = (d.get("author") or {}).get("login")
     if author == me():
         finish(e, "mine")
@@ -508,9 +536,14 @@ def sync_entry(e, d, rr):
         e["acted_head"] = reviewed or e.get("head")
         finish(e, disp, when)
         return [f"  {n}: {disp}"]
-    if e["lane"] == "cq" and any(l.startswith("commit-queue") for l in labels):
+    # Exact label: commit-queue-squash, -rebase, and -failed don't enqueue.
+    if e["lane"] == "cq" and "commit-queue" in labels:
         finish(e, "cq-labeled")
         return [f"  {n}: commit-queue added by someone else"]
+    # The lane changes only for an entry still open. A finished entry keeps
+    # the lane it was prepared in, which plan compares with the candidate's.
+    if n in rr and rr[n][0] in LANE_OF_BUCKET:
+        e["lane"] = LANE_OF_BUCKET[rr[n][0]]
     log = []
     if e["state"] in ("ready", "needs-run", "presented") and e["head"] != d["headRefOid"]:
         e["note"] = f"head moved from {e['head'][:12]} while {e['state']}"
@@ -550,8 +583,6 @@ def my_actions(d, since):
     return "; ".join(dict.fromkeys(a[1] for a in order)), iso(acts[-1][0]), reviewed
 
 
-# ---------------------------------------------------------------- prefetch
-
 def prefetch(n):
     """Everything a preparing agent needs, so it never calls gh itself. The
     new dossier and ref replace the old ones only after the fetched head
@@ -561,6 +592,9 @@ def prefetch(n):
             "number,title,body,author,baseRefName,headRefOid,reviewDecision,labels,mergeable,"
             "mergeStateStatus,files,commits,createdAt,updatedAt,isDraft,state")
     info = json.loads(pr)
+    if info.get("state") != "OPEN" or info.get("isDraft"):
+        # The cached candidate can be up to REFRESH_MINUTES old.
+        die(f"{n} is {'a draft' if info.get('isDraft') else info.get('state', '?').lower()}; not preparing it", 4)
 
     fetch_upstream()
     tmp_ref = f"refs/review-bank/tmp/{n}-{os.getpid()}"
@@ -599,14 +633,20 @@ def swap_in(n, new, tmp_ref, pr, info, head, lane, rf, cand):
     (new / "meta.json").write_text(json.dumps({
         "pr": n, "head": head, "ref": f"refs/review-bank/{n}", "lane": lane,
         "rereview_from": rf, "clone": str(CLONE), "fetched_at": iso(now())}, indent=1))
+    # The diff, discussion, and CI were read after the fetch. A push in
+    # between would mix two heads in one dossier.
+    now_head = gh("pr", "view", n, "--repo", REPO, "--json", "headRefOid", "--jq", ".headRefOid").strip()
+    if now_head != head:
+        die(f"{n}: head moved to {now_head[:12]} while fetching; rerun")
 
+    # Order: dossier into place, entry saved, then the ref, then the old
+    # dossier removed. A failure part way leaves the old dossier beside the
+    # new one, never a ref or entry that points at a missing dossier.
     with entry_lock(n):
-        git("update-ref", f"refs/review-bank/{n}", tmp_ref)
         d = DOSSIER / n
+        gone = d.with_name(f".{n}.old-{os.getpid()}")
         if d.exists():
-            gone = d.with_name(f".{n}.old-{os.getpid()}")
             d.rename(gone)
-            shutil.rmtree(gone, ignore_errors=True)
         new.rename(d)
         e = load(n)
         if e and e.get("state") in ("done", "stale") and e.get("body", "").strip():
@@ -616,10 +656,12 @@ def swap_in(n, new, tmp_ref, pr, info, head, lane, rf, cand):
             e = {"pr": n, "created_at": iso(now()), "disposition": "-",
                  "my_teams": (e or {}).get("my_teams")}
         e.update(url=f"https://github.com/{REPO}/pull/{n}", title=info["title"],
-                 author=info["author"]["login"], state="preparing", head=head, pr_head=head,
-                 updated_at=info["updatedAt"], lease=iso(now()), lane=lane,
+                 author=(info.get("author") or {}).get("login") or "ghost", state="preparing",
+                 head=head, pr_head=head, updated_at=info["updatedAt"], lease=iso(now()), lane=lane,
                  my_teams=cand.get("my_teams") or e.get("my_teams"), rereview_from=rf)
         save(e)
+        git("update-ref", f"refs/review-bank/{n}", tmp_ref)
+        shutil.rmtree(gone, ignore_errors=True)
     print(f"{n}: dossier {d}\n  ref refs/review-bank/{n} = {head[:12]}, lane {lane}, state preparing")
     print("  " + ci.stdout.strip().splitlines()[0] if ci.stdout.strip() else "  ci: no output")
 
@@ -660,8 +702,6 @@ def active_lines():
     write_atomic(p, f"active release lines on {today}: {' '.join(lines)}\n")
     return p.read_text()
 
-
-# ---------------------------------------------------------------- slots
 
 def slots():
     conf = BANK / "slots.tsv"
@@ -712,21 +752,29 @@ def slot_cmd(args):
                     return
         die("no free slot", 3)
     if args[0] == "release":
-        name, path = args[1], dict(slots()).get(args[1])
+        force = "--force" in args
+        rest = [a for a in args[1:] if a != "--force"]
+        name, pr = rest[0], (rest[1] if len(rest) > 1 else None)
+        path = dict(slots()).get(name)
         if path is None:
             die(f"no slot {name}")
+        if pr is None and not force:
+            die(f"usage: slot release {name} <pr> (the PR it was acquired for), or --force")
         ok, dirty, at = checkout_state(path)
-        if (dirty or not ok) and "--force" not in args:
+        if (dirty or not ok) and not force:
             die(f"slot {name} has changes; restore them (git checkout -- <file>) first:\n{dirty}" if ok else
                 f"slot {name}: git status failed in {path}; check it, then release with --force")
         with Flock("slots"):
+            h = SlotLock(name).holder()
+            # A repeated release (after a context reset, say) must not free a
+            # slot another agent has since acquired.
+            if h and pr is not None and h["pr"] != pr and not force:
+                die(f"slot {name} is held for #{h['pr']} by {h['owner']}, not #{pr}; not released")
             SlotLock(name).release()
         print(f"slot {name} released, at {at}" + ("" if at in ("main", "HEAD") else " (expected main)"))
         return
-    die("usage: slot status | acquire <slot|any> <pr> [owner] | release <slot> [--force]", 2)
+    die("usage: slot status | acquire <slot|any> <pr> [owner] | release <slot> <pr> | release <slot> --force", 2)
 
-
-# ---------------------------------------------------------------- output
 
 def show(e, header_only=False):
     moved = "" if e.get("pr_head") in (None, "-", e.get("head")) else f", HEAD MOVED to {e['pr_head'][:12]}"
@@ -752,12 +800,27 @@ def list_cmd(show_all, target=TARGET):
         print(f"  {e['state']:<9} {e['lane']:<13} https://github.com/{REPO}/pull/{e['pr']}{extra}{snz}{disp}  {e['title'][:60]}")
 
 
-def put(n, summary, state=None):
+def put(n, summary, state=None, head=None):
+    """Bank a verified summary. `head` is the head the draft was prepared
+    against (the prefetch line the agent was given); without it, the
+    dossier's meta.json. A draft for another head, or for an entry that is no
+    longer being prepared, is refused, so a late agent can't revive a done
+    entry, take over a newer preparation, or demote a presented one."""
     body = Path(summary).read_text()
     m = re.search(r"^#+ *Needs a run\s*\n(.*?)(?=^#|\Z)", body, re.S | re.M)
     pending = len(re.findall(r"^\s*- ", m.group(1), re.M)) if m else 0
     with entry_lock(n):
         e = load(n) or die(f"no entry for {n}; prefetch it first")
+        if e["state"] not in ("preparing", "needs-run"):
+            die(f"#{n} is {e['state']}, not preparing or needs-run; not banked", 5)
+        if not head:
+            try:
+                head = json.loads((DOSSIER / str(n) / "meta.json").read_text())["head"]
+            except (OSError, ValueError, KeyError):
+                die(f"#{n}: no dossier meta.json to check the head against; pass --head <sha>", 5)
+        if len(head) < 7 or not e["head"].startswith(head):
+            die(f"#{n}: the draft is for {head[:12]}, but the entry is now prepared against "
+                f"{e['head'][:12]}; not banked (prepare it again)", 5)
         e["body"] = body
         e["needs_run"] = str(pending)
         e["prepared_at"] = iso(now())
@@ -785,6 +848,9 @@ def present():
             die("nothing ready" + (f" ({asleep} snoozed)" if asleep else ""), 3)
         with entry_lock(ready[0]["pr"]):
             e = load(ready[0]["pr"])
+            # A sync or set may have changed it while this waited for the lock.
+            if e["state"] not in ("ready", "needs-run") or snoozed(e):
+                die(f"#{e['pr']} changed to {e['state']} while presenting; run present again", 6)
             e["state"], e["presented_at"] = "presented", iso(now())
             rest = sum(x["state"] in ("ready", "needs-run") for x in es if x["pr"] != e["pr"])
             # Print first: if output fails, the entry isn't left claimed.
@@ -811,8 +877,9 @@ def set_cmd(n, kvs):
                 except ValueError:
                     die(f"{k} must be an ISO time such as {iso(now())}")
             e[k] = v
-        if e["state"] == "done" and e.get("disposition_at") in (None, "-"):
-            finish(e, e["disposition"])
+        if e["state"] == "done":
+            # Always through finish, so the dossier and ref are cleaned up.
+            finish(e, e["disposition"], e.get("disposition_at") if e.get("disposition_at") not in (None, "-") else None)
         else:
             save(e)
     show(e, header_only=True)
@@ -864,7 +931,8 @@ def main(argv):
         prefetch(args[0])
     elif cmd == "put":
         st = args[args.index("--state") + 1] if "--state" in args else None
-        put(args[0], args[1], st)
+        hd = args[args.index("--head") + 1] if "--head" in args else None
+        put(args[0], args[1], st, hd)
     elif cmd == "set":
         set_cmd(args[0], args[1:])
     elif cmd == "slot":

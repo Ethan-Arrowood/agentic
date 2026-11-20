@@ -46,7 +46,7 @@ if [ $rc -ne 0 ] || [ -z "$result" ]; then
 fi
 cicommit=$(print -r -- "$out" | grep -oE '\[[0-9a-f]{12}' | head -1 | tr -d '[')
 if [ "${head:0:12}" = "$cicommit" ]; then match="HEAD-MATCH"; else match="STALE (ran $cicommit != head ${head:0:12})"; fi
-echo "#$n: CI=$result  job=$prjob  $match"
+echo "#$n: CI=$result  job=$prjob  $match  [head ${head:0:12}]"
 if [ "$result" = "FAILURE" ]; then
   echo "  failure detail (classify: is it the PR's subsystem, or unrelated flake/rebase?):"
   print -r -- "$out" | grep -iE '^Type|^Reason|not ok [0-9]|CRASHED' | grep -ivE 'querying|download' | sed 's/^/    /' | head -14

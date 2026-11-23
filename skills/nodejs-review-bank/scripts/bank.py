@@ -883,9 +883,9 @@ def discussion(n):
 
 # The automation screen. Node's AI policy (doc/contributing/ai-guidelines.md)
 # allows AI help, but automated tooling must not open pull requests without
-# approval, and a contributor who used AI should disclose it and say how they
-# personally verified the result. The agentscan label and the bot's AgentScan
-# caution are heuristics, so they only trigger the check. Detection is
+# approval, and a contributor who used AI should disclose it. Collaborators are
+# trusted and skip the screen. For everyone else, the agentscan label and the
+# bot's AgentScan caution are heuristics that trigger the check. Detection is
 # deliberately simple: anything short of a clear pass is unclear, and the user
 # decides.
 AI_WORDS = (r"(?:\bAI\b|\bLLMs?\b|claude|copilot|codex|chatgpt|\bGPT|gemini|cursor|"
@@ -895,11 +895,38 @@ DISCLOSURE = re.compile(
     rf"AI[- ]disclosure|AI[- ]assist|{AI_WORDS}[- ](?:assisted|generated|written|helped)|"
     rf"(?:used|using|with the help of|generated (?:with|by)|written (?:with|by)|assisted by)\s+(?:an?\s+|the\s+)?{AI_WORDS}|"
     rf"{AI_WORDS}\s+(?:was|were)\s+used", re.I)
-VERIFIED = re.compile(r"\bI\s+(?:have\s+|also\s+)?(?:personally\s+)?"
-                      r"(?:ran|run|tested|verified|reviewed|checked|reproduced|confirmed|read)\b|"
-                      r"\bpersonally\s+(?:ran|tested|verified|reviewed|checked|reproduced)", re.I)
 MODERATION = "https://github.com/nodejs/admin/blob/main/Moderation-Policy.md"
 AI_POLICY = "https://github.com/nodejs/node/blob/HEAD/doc/contributing/ai-guidelines.md"
+# README.md sections whose members are collaborators. Emeriti and triagers aren't.
+COLLABORATOR_SECTIONS = ("#### TSC voting members", "#### TSC regular members", "### Collaborators")
+COLLABORATORS_HOURS = 24
+
+
+def collaborators():
+    """Logins (lowercase) of current collaborators, from README.md on
+    upstream/main, cached for a day. Empty if the README can't be read, so
+    the screen then applies to everyone."""
+    p = CACHE / "collaborators.json"
+    try:
+        if time.time() - p.stat().st_mtime < COLLABORATORS_HOURS * 3600:
+            return set(json.loads(p.read_text()))
+    except (OSError, ValueError):
+        pass
+    try:
+        readme = git("show", "upstream/main:README.md")
+    except RuntimeError:
+        return set()
+    logins, section = set(), None
+    for line in readme.splitlines():
+        if line.startswith("#"):
+            section = line.strip() in COLLABORATOR_SECTIONS
+            continue
+        m = section and re.match(r"^\* \[([^\]]+)\]", line)
+        if m:
+            logins.add(m.group(1).lower())
+    if logins:
+        write_atomic(p, json.dumps(sorted(logins)))
+    return logins
 
 
 def snippet(m, text, width=100):
@@ -914,6 +941,8 @@ def screen(info, disc):
     unclear, or fail), why, and the signals found."""
     body = info.get("body") or ""
     author = (info.get("author") or {}).get("login")
+    if author and author.lower() in collaborators():
+        return dict(result="pass", why="skipped: collaborator", signals=None)
     labels = [l["name"] for l in info.get("labels") or []]
     flagged = [l for l in labels if l.startswith("agentscan:")]
     comments = disc.get("comments") or []
@@ -925,33 +954,30 @@ def screen(info, disc):
     messages = "\n".join(c.get("messageBody") or "" for c in info.get("commits") or [])
     trailers = sorted({" ".join(t.split()) for t in AI_TRAILER.findall(messages)})
     told = snippet(DISCLOSURE.search(body), body)
-    checked = snippet(VERIFIED.search(body), body)
     disclosed = bool(trailers or told)
     sig = {"agentscan_labels": flagged, "agentscan_caution": caution, "first_contribution": first,
-           "author_association": assoc, "ai_trailers": trailers, "disclosure": told, "verification": checked}
-    if not (flagged or caution or disclosed):
-        return dict(result="pass", why="no automation signals", signals=sig)
-    if disclosed and checked:
-        return dict(result="pass", why="AI use disclosed, with a statement of personal verification", signals=sig)
-    if (flagged or caution) and not disclosed:
-        return dict(result="fail", why="flagged by AgentScan, with no AI disclosure or verification statement",
-                    signals=sig)
-    # Disclosed, but with no statement of personal verification.
-    flag = "flagged by AgentScan; " if flagged or caution else ""
-    return dict(result="unclear", why=f"{flag}AI use disclosed, with no statement of personal verification",
-                signals=sig)
+           "author_association": assoc, "ai_trailers": trailers, "disclosure": told}
+    if not (flagged or caution):
+        why = "not flagged by AgentScan" + ("; AI use disclosed" if disclosed else "")
+        return dict(result="pass", why=why, signals=sig)
+    if not disclosed:
+        return dict(result="fail", why="flagged by AgentScan, with no AI disclosure", signals=sig)
+    # Flagged and disclosed: the flag suggests automated opening, which the
+    # policy forbids without approval, so a disclosure alone doesn't settle it.
+    return dict(result="unclear", why="flagged by AgentScan; AI use disclosed", signals=sig)
 
 
 def screen_line(sc):
     """The signals on one line, for list, plan, and the entry's screen field."""
     s = sc["signals"]
+    if not s:
+        return f"{sc['result']}: {sc['why']}"
     parts = [*s["agentscan_labels"]]
     if s["agentscan_caution"]:
         parts.append("AgentScan caution")
     if s["first_contribution"]:
         parts.append("first contribution")
     parts.append("disclosed" if s["disclosure"] or s["ai_trailers"] else "no disclosure")
-    parts.append("verified" if s["verification"] else "no verification")
     return f"{sc['result']}: " + ", ".join(parts)
 
 
@@ -968,21 +994,21 @@ def screen_body(n, info, sc):
              f"- AgentScan: label {', '.join(s['agentscan_labels']) or 'none'}; caution in the github-actions "
              f"comment: {'yes' if s['agentscan_caution'] else 'no'}",
              f"- AI disclosure in the PR body: {found(s['disclosure'])}",
-             f"- AI trailers in the commits: {', '.join(s['ai_trailers']) or 'none'}",
-             f"- Personal verification statement: {found(s['verification'])}", "",
+             f"- AI trailers in the commits: {', '.join(s['ai_trailers']) or 'none'}", "",
              "Read the PR body and commits yourself before deciding: the screen is pattern matching.", "",
              "### Policy", "",
              f"[AI use policy]({AI_POLICY}):", "",
              "- Pull requests must not be opened by automated tooling without approval in advance.",
-             "- A contributor who used AI should disclose it and say how they personally verified the output.",
+             "- A contributor who used AI should disclose it, and must understand, test, and verify what they submit.",
              "- AI-generated pull requests the contributor hasn't understood, tested, and verified are subject "
              "to closure without further review.",
              f"- Messages generated entirely by AI may be removed under the [moderation policy]({MODERATION}).", "",
              "### Outline for your comment", "",
              "- Point to the github-actions welcome comment (the AgentScan caution) and the AI use policy.",
              "- Ask them to confirm they follow the contribution policies.",
-             f"- Name what's missing: {'an AI disclosure and ' if not (s['disclosure'] or s['ai_trailers']) else ''}"
-             "a statement of how they personally tested and verified the change.",
+             "- Name what's missing: " + ("the AI disclosure, and confirmation that a person opened the PR and "
+             "will handle review." if not (s["disclosure"] or s["ai_trailers"]) else
+             "confirmation that a person, not automated tooling, opened the PR and will handle review."),
              "- Say you'll review once they respond.", "",
              "### Next", "",
              f"After you comment, `sync` holds it for {SCREEN_HOURS} hours. A comment or push by @{author} wakes it "

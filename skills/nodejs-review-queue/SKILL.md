@@ -140,21 +140,25 @@ gh pr diff <n> --repo nodejs/node
 **Automation screen, before reading the diff.** Node.js's [AI use policy](https://github.com/nodejs/node/blob/HEAD/doc/contributing/ai-guidelines.md) allows AI help, with rules:
 
 - Pull requests must not be opened by automated tooling without approval in advance.
-- A contributor who used AI should disclose it and say what they did to personally verify the output.
+- A contributor who used AI should disclose it, and must understand, test, and verify what they submit.
 - AI-generated pull requests the contributor hasn't understood, tested, and verified "will be subject to closure without additional review".
 - Messages generated entirely by AI may be removed under the [moderation policy](https://github.com/nodejs/admin/blob/main/Moderation-Policy.md).
 
-Check for these signals:
+Skip the screen for collaborators: anyone in the TSC voting or regular members or *Collaborators* sections of `README.md` on `upstream/main`. Emeriti and triagers don't count, and GitHub's `MEMBER` association doesn't either, since triagers have it too.
+
+For everyone else, check for these signals:
 
 - An `agentscan:*` label, or the AgentScan caution in the github-actions welcome comment. Both are heuristics, not proof.
 - AI disclosure in the PR body, and AI trailers such as `Assisted-by:` in the commits.
-- A statement that the author personally ran, tested, or verified the change.
 - Agent-style work: a templated body, many similar PRs, a first contribution.
 
 Outcomes:
 
-- **Pass:** no automation signals, or AI use disclosed with a statement of personal verification. Review normally, and note the disclosure in one line under process state.
-- **Fail or unclear:** flagged with no disclosure, disclosure with no verification statement, or anything you can't call either way. Don't review. Give the user the signals and an outline for their comment: link the github-actions welcome comment and the AI use policy, ask the author to confirm they follow the contribution policies, and name what's missing (the disclosure, the verification statement, or both). Wait 48 hours. If the author responds as a person (a comment or a push), review it. If not, recommend closing it per the AI use policy and the moderation policy. The user posts every comment and closes the PR.
+- **Pass:** not flagged by AgentScan, whether or not AI use is disclosed. AI use is fine. Review normally, and note any disclosure in one line under process state.
+- **Fail:** flagged by AgentScan, with no AI disclosure.
+- **Unclear:** flagged by AgentScan, with an AI disclosure, or anything else you can't call. The flag suggests automated opening, which the policy forbids without approval, so a disclosure alone doesn't settle it.
+
+On fail or unclear, don't review. Give the user the signals and an outline for their comment: link the github-actions welcome comment and the AI use policy, ask the author to confirm they follow the contribution policies, and name what's missing. Wait 48 hours. If the author responds as a person (a comment or a push), review it. If not, recommend closing it per the AI use policy and the moderation policy. The user posts every comment and closes the PR.
 
 **CI status:** never conclude it from `gh pr checks`. GitHub's check list mixes stale nodes with the current Jenkins run and has caused a wrong "CI failing" call. Use `nodejs-contribute`'s `scripts/ci-status.sh <pr>`, which runs `ncu-ci` against the current head.
 

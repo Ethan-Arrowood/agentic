@@ -243,7 +243,7 @@ class BankTest(unittest.TestCase):
         self.assertEqual(self.entry(5)["state"], "ready")
 
 
-    def make_clone(self, pr_head_commit_msg="pr"):
+    def make_clone(self, pr_head_commit_msg="pr", readme=None):
         """A clone whose upstream has main and refs/pull/5/head. Returns the PR head sha."""
         up = self.tmp / "upstream.git"
         work = self.tmp / "work"
@@ -255,6 +255,9 @@ class BankTest(unittest.TestCase):
             g("config", k, v, cwd=work)
         (work / "f").write_text("main\n")
         g("add", "f", cwd=work)
+        if readme is not None:
+            (work / "README.md").write_text(readme)
+            g("add", "README.md", cwd=work)
         g("commit", "-qm", "main", cwd=work)
         g("push", "-q", str(up), "main", cwd=work)
         (work / "f").write_text("pr\n")
@@ -992,13 +995,21 @@ class BankTest(unittest.TestCase):
     WELCOME = ("Welcome to Node.js, and thank you for your first contribution!\n\n> [!CAUTION]\n"
                "> AgentScan found account activity patterns that may be consistent with automation.")
 
-    def prefetch_screen(self, body="", labels=(), messages=(), comments=()):
-        """Prefetch PR 5 with this body, labels, commit messages, and PR comments."""
-        head = self.make_clone()
+    README = ("# Node.js\n\n### TSC (Technical Steering Committee)\n\n#### TSC voting members\n\n"
+              "* [TscMember](https://github.com/TscMember) -\n  **T**\n\n#### TSC emeriti members\n\n"
+              "* [OldTsc](https://github.com/OldTsc) -\n  **O**\n\n### Collaborators\n\n"
+              "* [ShogunPanda](https://github.com/ShogunPanda) -\n  **Paolo**\n\n### Collaborator emeriti\n\n"
+              "* [OldCollab](https://github.com/OldCollab) -\n  **O**\n\n### Triagers\n\n"
+              "* [someone](https://github.com/someone) -\n  **S**\n")
+
+    def prefetch_screen(self, body="", labels=(), messages=(), comments=(), author="someone"):
+        """Prefetch PR 5 with this body, labels, commit messages, PR comments, and author."""
+        head = self.make_clone(readme=self.README)
         self.cache("release-lines.txt", "active release lines: v22 v24 v26\n")
         rules = self.prefetch_rules(head)
         pr = rules[1]["stdout"]
         pr["body"], pr["labels"] = body, [{"name": l} for l in labels]
+        pr["author"] = {"login": author}
         pr["commits"] = [{"oid": head, "messageHeadline": "x", "messageBody": m} for m in messages]
         disc = rules[3]["stdout"]["data"]["repository"]["pullRequest"]["comments"]
         disc["nodes"] = [{"author": {"login": who}, "authorAssociation": assoc, "createdAt": ago(hours=2),
@@ -1009,27 +1020,50 @@ class BankTest(unittest.TestCase):
         out = self.run_bank("prefetch", "5").stdout
         return head, out, json.loads((self.bank / "dossier" / "5" / "screen.json").read_text())
 
+    FLAGGED = dict(labels=["stream", "agentscan:automated-account"])
+
     def test_screen_passes_a_pr_with_no_automation_signals(self):
-        _, out, sc = self.prefetch_screen(body="Fixes a bug. I ran the tests.")
+        _, out, sc = self.prefetch_screen(body="Fixes a bug.")
         self.assertEqual(sc["result"], "pass")
         self.assertEqual(self.entry(5)["state"], "preparing")
         self.assertIn("gates:", out)
 
-    def test_screen_passes_a_disclosed_and_verified_pr(self):
+    def test_screen_skips_collaborators_even_when_flagged(self):
+        for login in ("ShogunPanda", "tscmember"):
+            with self.subTest(login=login):
+                shutil.rmtree(self.tmp / "clone", ignore_errors=True)
+                shutil.rmtree(self.tmp / "work", ignore_errors=True)
+                shutil.rmtree(self.tmp / "upstream.git", ignore_errors=True)
+                shutil.rmtree(self.bank / "dossier", ignore_errors=True)
+                (self.bank / "prs" / "5.md").unlink(missing_ok=True)
+                _, _, sc = self.prefetch_screen(body="No disclosure.", author=login, **self.FLAGGED)
+                self.assertEqual((sc["result"], sc["why"]), ("pass", "skipped: collaborator"))
+                self.assertEqual(self.entry(5)["lane"], "fresh")
+                self.assertEqual(self.entry(5)["screen"], "pass: skipped: collaborator")
+
+    def test_screen_does_not_trust_emeriti_or_triagers(self):
+        cached = json.loads((self.bank / "cache" / "collaborators.json").read_text()) \
+            if (self.bank / "cache" / "collaborators.json").exists() else None
+        self.assertIsNone(cached)
+        _, _, sc = self.prefetch_screen(body="No disclosure.", author="someone", **self.FLAGGED)
+        self.assertEqual(sc["result"], "fail")
+        logins = json.loads((self.bank / "cache" / "collaborators.json").read_text())
+        self.assertEqual(logins, ["shogunpanda", "tscmember"])
+
+    def test_screen_passes_an_unflagged_pr_that_discloses_ai_use(self):
         _, out, sc = self.prefetch_screen(
-            body="AI disclosure: Claude Code was used to write the change.\n\n"
-                 "Testing: I personally ran the regression test on a release build.",
+            body="AI disclosure: Claude Code was used to write the change.",
             labels=["http"], messages=["fix\n\nAssisted-by: a closed-source coding agent\nSigned-off-by: x"])
         self.assertEqual(sc["result"], "pass", sc)
         self.assertEqual(sc["signals"]["ai_trailers"], ["Assisted-by: a closed-source coding agent"])
         e = self.entry(5)
         self.assertEqual((e["state"], e["lane"]), ("preparing", "fresh"))
-        self.assertEqual(e["screen"], "pass: disclosed, verified")
+        self.assertEqual(e["screen"], "pass: disclosed")
 
     def test_screen_fails_a_flagged_pr_with_no_disclosure_and_needs_no_agent(self):
         _, out, sc = self.prefetch_screen(
-            body="This fixes duplicate bytes in Utf8Stream.", labels=["stream", "agentscan:automated-account"],
-            comments=[("github-actions", "CONTRIBUTOR", self.WELCOME)])
+            body="This fixes duplicate bytes in Utf8Stream.", comments=[("github-actions", "CONTRIBUTOR", self.WELCOME)],
+            **self.FLAGGED)
         self.assertEqual(sc["result"], "fail")
         self.assertTrue(sc["signals"]["agentscan_caution"])
         self.assertTrue(sc["signals"]["first_contribution"])
@@ -1041,14 +1075,15 @@ class BankTest(unittest.TestCase):
         self.assertFalse(any("statusCheckRollup" in " ".join(c) for c in self.calls()))
         self.assertFalse((self.bank / "dossier" / "5" / "ci.txt").exists())
         self.assertIn("(screen fail: agentscan:automated-account, AgentScan caution, first contribution, "
-                      "no disclosure, no verification)", self.run_bank("list").stdout)
+                      "no disclosure)", self.run_bank("list").stdout)
         self.assertIn("SCREEN 5 ready fail:", self.run_bank("plan", "--all").stdout)
         shown = self.run_bank("present").stdout
         self.assertIn("(automation screen)", shown)
 
-    def test_screen_is_unclear_when_ai_use_is_disclosed_without_verification(self):
-        _, _, sc = self.prefetch_screen(body="This change was generated with Copilot.")
+    def test_screen_is_unclear_when_a_flagged_pr_discloses_ai_use(self):
+        _, _, sc = self.prefetch_screen(body="This change was generated with Copilot.", **self.FLAGGED)
         self.assertEqual(sc["result"], "unclear")
+        self.assertEqual(sc["why"], "flagged by AgentScan; AI use disclosed")
         self.assertEqual(self.entry(5)["lane"], "screen")
 
     def test_screen_entries_do_not_use_the_banks_room(self):

@@ -273,15 +273,17 @@ Run recipes, from the slot's checkout:
 
 ## Automation screen
 
-Node.js's [AI use policy](https://github.com/nodejs/node/blob/HEAD/doc/contributing/ai-guidelines.md) allows AI help, but automated tooling must not open PRs without approval, and a contributor who used AI should disclose it and say how they personally verified the result. `nodejs-review-queue`'s step 2 has the rules. The user reviews honest, policy-following PRs and handles the rest by hand, so prefetch screens every PR before an agent is spent:
+Node.js's [AI use policy](https://github.com/nodejs/node/blob/HEAD/doc/contributing/ai-guidelines.md) allows AI help, but automated tooling must not open PRs without approval, and a contributor who used AI should disclose it. `nodejs-review-queue`'s step 2 has the rules. The user reviews honest, policy-following PRs and handles the rest by hand, so prefetch screens every PR before an agent is spent:
 
 | Result | When | What happens |
 |--------|------|--------------|
-| `pass` | No automation signals, or AI use disclosed with a statement of personal verification | Prepared as usual. The summary notes the disclosure in one process line. |
+| `pass` | The author is a collaborator (screen skipped), or the PR isn't flagged by AgentScan, whether or not AI use is disclosed | Prepared as usual. The summary notes any disclosure in one process line. |
 | `fail` | An `agentscan:*` label or the bot's AgentScan caution, and no AI disclosure | A `screen` entry: no review |
-| `unclear` | AI use disclosed (body or an `Assisted-by:`-style trailer) with no verification statement | A `screen` entry: no review |
+| `unclear` | Flagged by AgentScan, with an AI disclosure (body or an `Assisted-by:`-style trailer) | A `screen` entry: no review |
 
-Signals, in `screen.json` and on the entry's `list` line: `agentscan:*` labels, the AgentScan caution and the first-contribution note in the github-actions welcome comment, the author's association, disclosure text, AI trailers, and a first-person verification statement ("I ran", "I personally tested"). The AgentScan flag is a heuristic, and the detection is pattern matching, so anything short of a clear pass is `unclear`, never `fail` on AI use alone. Read the PR body and commits before acting on a screen entry.
+Collaborators come from the TSC voting and regular members and *Collaborators* sections of `README.md` on `upstream/main` in the clone, cached for a day in `cache/collaborators.json`. Emeriti and triagers aren't collaborators. If the README can't be read, the screen applies to everyone.
+
+Signals, in `screen.json` and on the entry's `list` line: `agentscan:*` labels, the AgentScan caution and the first-contribution note in the github-actions welcome comment, the author's association, disclosure text, and AI trailers. AI use alone never fails the screen. The AgentScan flag is a heuristic, and the detection is pattern matching, so read the PR body and commits before acting on a screen entry.
 
 A screen entry's body has the signals, the policy, and an outline for the user's comment: point to the welcome comment and the AI use policy, ask the author to confirm they follow the contribution policies, and name what's missing. It's an outline: the user writes the comment.
 

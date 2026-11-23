@@ -42,7 +42,7 @@ This skill builds on two others, which must be installed alongside it:
 | `archive/` | Earlier entries for a PR that came back after a new push |
 | `slots.tsv` | Slot name and checkout path, one per line |
 
-Entry front matter: `pr`, `url`, `title`, `author`, `lane`, `state`, `head` (SHA prepared against), `pr_head` (latest seen), `acted_head` (the head the user's action covered: the reviewed commit, else `head`), `created_at`, `prepared_at`, `presented_at`, `my_teams`, `rereview_from` (commit of the user's last decisive review), `needs_run` (count), `disposition`, `disposition_at`, `snooze_until`, `lease`, `note`, `wait_since` and `wait_for` (see [Holds](#holds)). Edit fields only through `bank.py set`, `hold`, and `unhold`.
+Entry front matter: `pr`, `url`, `title`, `author`, `lane`, `state`, `head` (SHA prepared against), `pr_head` (latest seen), `acted_head` (the head the user's action covered: the reviewed commit, else `head`), `created_at`, `prepared_at`, `presented_at`, `my_teams`, `rereview_from` (commit of the user's last decisive review), `needs_run` (count), `disposition`, `disposition_at`, `snooze_until`, `lease`, `note`, `wait_since` and `wait_for` (see [Holds](#holds)), `screen` (the [automation screen](#automation-screen) result). Edit fields only through `bank.py set`, `hold`, and `unhold`.
 
 **States:**
 
@@ -56,7 +56,7 @@ Entry front matter: `pr`, `url`, `title`, `author`, `lane`, `state`, `head` (SHA
 | `waiting` | Held until others review it, a push, the landing gates, or a time. See [Holds](#holds). |
 | `done` | The user acted, or the PR closed (`landed <sha>` when it has a "Landed in" comment), merged, became a draft, was deleted (`not-found`), or got `commit-queue` |
 
-**Lanes**, in priority order: `rereview-asap`, `rereview`, `cq`, `fresh` (one of the user's teams unchecked), `fresh-checked`, `skip` (the *Subsystem skip list*: inspector and diagnostics_channel). The first three are `rereview.py`'s RE-REVIEW-ASAP, RE-REVIEW, and CQ-CANDIDATE buckets. Within a lane, the most recently updated PR comes first.
+**Lanes**, in priority order: `screen` (PRs that failed the [automation screen](#automation-screen) or were unclear; quick, and handled by the user), `rereview-asap`, `rereview`, `cq`, `fresh` (one of the user's teams unchecked), `fresh-checked`, `skip` (the *Subsystem skip list*: inspector and diagnostics_channel). The first three are `rereview.py`'s RE-REVIEW-ASAP, RE-REVIEW, and CQ-CANDIDATE buckets. Within a lane, the most recently updated PR comes first.
 
 `bank.py list` prints the bank by priority. `bank.py show <pr>` prints one entry.
 
@@ -74,6 +74,7 @@ Entry front matter: `pr`, `url`, `title`, `author`, `lane`, `state`, `head` (SHA
 | `timeline.json` | Commits and force-pushes, oldest first, and `head_pushed_at`: when the head was pushed (exact from a force-push, otherwise approximate) |
 | `metadata.txt` | `cq` entries only: `git node metadata`, read-only: approvals by name, failed GitHub Actions jobs, the last Jenkins CI, and the generated commit metadata. A nonzero exit usually means it found a landing blocker. |
 | `release-lines.txt` | Active release lines |
+| `screen.json` | The [automation screen](#automation-screen): `result` (`pass`, `unclear`, or `fail`), why, and the signals found |
 | `meta.json` | Head, ref, lane, `rereview_from` |
 
 A failed `gates.json` query or `git node metadata` run doesn't stop the prefetch: the file records the error. `BANK_METADATA=all` writes `metadata.txt` for every lane, `off` for none.
@@ -91,12 +92,15 @@ A hold says "I've done my part; bring it back later". A `waiting` entry isn't pl
 | `landing=<time>` | The landing wait is over: 48 hours from when the PR opened, 72 when those hours touch a Saturday or Sunday (UTC), none with `fast-track` (`nodejs-contribute`, *Landing*). Recomputed each sync. |
 | `ci` | The cached `ci-status.sh` result is green at the head |
 | `until=<time>` | That time passes |
+| `author=<login>` | The PR's author comments since `wait_since` |
+| `screen` | Marks a screen hold: an author comment or push wakes it for a review, and `until` alone brings it back with a close recommendation (see [Automation screen](#automation-screen)) |
 
 The user's own actions don't wake a hold. A woken entry is `done` with the note `woke: <what woke it>`, and plan puts the PR back in its lane even at a head the user already acted on. Its `PREPARE` line carries the note. A PR that closes, becomes a draft, or is deleted while held is done as usual.
 
 Holds come from two places:
 
 - **By hand:** `bank.py hold <pr> [--until <ISO>] [--until-reviews N] [note]` waits for N reviews by others (default 1, `0` for none), a push, or `--until`. It works for a candidate with no entry yet, and for an entry in any state. It makes no GitHub call, so the push condition uses the latest head the bank has seen. It drops the dossier and ref: others' reviews or a push make the old review stale anyway. `bank.py unhold <pr>` wakes it now.
+- **By sync, after a screen:** when the user acts on a `screen` entry (usually a comment asking for the policy), sync holds it on an author comment, a push, and `until` = `SCREEN_HOURS` (48) later. `bank.py hold <pr> --screen [--until <ISO>] [note]` does the same by hand.
 - **By sync:** when the user approves at the head and the PR can't land yet (the landing wait isn't over, or CI isn't green at the head), sync records the approval and holds the entry on one review by others, a push, and whichever landing gates are still closed. A wake by one gate leaves the other to the `cq` lane's own check.
 
 `bank.py plan --all` lists each hold as `WAIT <pr> lane=<lane>` with its conditions.
@@ -124,7 +128,7 @@ It takes a lock, so overlapping ticks exit early. Then it:
 
 For each `PREPARE` line, while agents are free:
 
-1. `scripts/bank.py prefetch <pr>`: refuses a PR that is closed or a draft (exit 4). Otherwise writes `dossier/<pr>/` and fetches the PR head to `refs/review-bank/<pr>` in `~/dev/nodejs/node` (without touching any working tree or `FETCH_HEAD`). It also fetches `upstream/main` and the `upstream/v*-staging` branches, at most every 30 minutes. It builds the new dossier and ref aside and replaces the old ones only once the fetched head matches GitHub's, before and after the dossier is built, so a failed prefetch leaves an earlier one intact. Note the head on its `ref` line: `put` needs it. Re-preparing a `stale` or `done` entry archives the earlier review and starts clean. The entry moves to `preparing`.
+1. `scripts/bank.py prefetch <pr>`: refuses a PR that is closed or a draft (exit 4). Otherwise writes `dossier/<pr>/` and fetches the PR head to `refs/review-bank/<pr>` in `~/dev/nodejs/node` (without touching any working tree or `FETCH_HEAD`). It also fetches `upstream/main` and the `upstream/v*-staging` branches, at most every 30 minutes. It builds the new dossier and ref aside and replaces the old ones only once the fetched head matches GitHub's, before and after the dossier is built, so a failed prefetch leaves an earlier one intact. Note the head on its `ref` line: `put` needs it. Re-preparing a `stale` or `done` entry archives the earlier review and starts clean. The entry moves to `preparing`. Prefetch also runs the [automation screen](#automation-screen). A PR that doesn't pass becomes a `ready` entry in the `screen` lane with no CI or gates calls and no agent: skip steps 2 and 3 for it.
 2. Decide whether it needs a slot. Most PRs don't: start read-only, and let verification ask for runs. Give a slot up front only when the claim to check is a crash or a behavior change.
 3. Start a preparing agent with the [brief](#preparing-agent-brief).
 
@@ -267,11 +271,32 @@ Run recipes, from the slot's checkout:
   ```
   A conflict from `git merge-file` means the PR needs `repro.sh` instead. New `lib/` files need a rebuild (`nodejs-contribute`, *Configure-time feature gating*).
 
+## Automation screen
+
+Node.js's [AI use policy](https://github.com/nodejs/node/blob/HEAD/doc/contributing/ai-guidelines.md) allows AI help, but automated tooling must not open PRs without approval, and a contributor who used AI should disclose it and say how they personally verified the result. `nodejs-review-queue`'s step 2 has the rules. The user reviews honest, policy-following PRs and handles the rest by hand, so prefetch screens every PR before an agent is spent:
+
+| Result | When | What happens |
+|--------|------|--------------|
+| `pass` | No automation signals, or AI use disclosed with a statement of personal verification | Prepared as usual. The summary notes the disclosure in one process line. |
+| `fail` | An `agentscan:*` label or the bot's AgentScan caution, and no AI disclosure | A `screen` entry: no review |
+| `unclear` | AI use disclosed (body or an `Assisted-by:`-style trailer) with no verification statement | A `screen` entry: no review |
+
+Signals, in `screen.json` and on the entry's `list` line: `agentscan:*` labels, the AgentScan caution and the first-contribution note in the github-actions welcome comment, the author's association, disclosure text, AI trailers, and a first-person verification statement ("I ran", "I personally tested"). The AgentScan flag is a heuristic, and the detection is pattern matching, so anything short of a clear pass is `unclear`, never `fail` on AI use alone. Read the PR body and commits before acting on a screen entry.
+
+A screen entry's body has the signals, the policy, and an outline for the user's comment: point to the welcome comment and the AI use policy, ask the author to confirm they follow the contribution policies, and name what's missing. It's an outline: the user writes the comment.
+
+After the user comments, `sync` holds the entry for 48 hours (see [Holds](#holds)):
+
+- **The author comments or pushes:** it wakes (`woke: author responded: …`) and is planned in its normal lane. The next prefetch skips the screen and records why, and it gets a real review.
+- **No response:** it comes back as a `ready` `screen` entry recommending closure per the AI use policy and the [moderation policy](https://github.com/nodejs/admin/blob/main/Moderation-Policy.md), with an outline for the closing comment. The user closes it, and sync records `closed`.
+
+Screen entries don't count toward `BANK_TARGET`. `bank.py plan --all` lists them as `SCREEN <pr> <state> <result>: <signals>`.
+
 ## Presentation mode
 
 When the user says they're ready ("next review", "show me the bank"):
 
-1. Run `bank.py sync`, then `bank.py present`. It marks the top `ready` entry (or `needs-run` if none are ready) as presented and prints it. Snoozed entries wait. Present the summary, with the PR's full URL.
+1. Run `bank.py sync`, then `bank.py present`. It marks the top `ready` entry (or `needs-run` if none are ready) as presented and prints it. Snoozed entries wait. Present the summary, with the PR's full URL. A `screen` entry comes first: present its signals and the comment outline, not a review.
 2. Stop and wait, exactly as `nodejs-review-queue`'s *Stop and wait*. Outlines and proofreading follow that skill's step 2.
 3. When the user says they're done with it, run `bank.py sync <pr>`. If it finds their action, the entry is done. Report the recorded disposition and present the next one.
 4. If GitHub shows no action yet, say so and ask: they may not have submitted, or chose to skip. Record their answer: `bank.py set <pr> state=done disposition=skipped`, `bank.py set <pr> state=ready snooze_until=<ISO time>` for later, or `bank.py hold <pr> [--until-reviews N] [note]` to wait for others (see [Holds](#holds)).

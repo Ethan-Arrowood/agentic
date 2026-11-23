@@ -11,10 +11,11 @@ rate limit. Read-only on GitHub: nothing here posts, labels, or reviews.
   bank.py list [--all]                    the bank, by priority
   bank.py show <pr>                       one entry
   bank.py present                         mark the top ready entry presented, show it
-  bank.py prefetch <pr>                   fetch the PR's dossier and claim the entry
+  bank.py prefetch <pr>                   fetch the PR's dossier and claim the entry (or screen it)
   bank.py put <pr> <summary.md> [--head <sha>]   bank a verified summary (ready or needs-run)
   bank.py set <pr> key=value...           edit entry fields (state=done disposition=skipped)
   bank.py hold <pr> [--until ISO] [--until-reviews N] [note]   wait for others' reviews, a push, or a time
+  bank.py hold <pr> --screen [--until ISO] [note]   wait for the author after an automation screen (48 h)
   bank.py unhold <pr>                     end a hold now
   bank.py slot status|acquire <slot|any> <pr> [owner]|release <slot> <pr>|release <slot> --force
   bank.py image prune                     remove free slots' out/ volumes for unused images
@@ -23,7 +24,8 @@ Env: NODE_REVIEW_BANK (bank dir), NODE_CLONE (default ~/dev/nodejs/node),
 REPO, ME, BANK_TARGET (default 6), REFRESH_MINUTES (default 120),
 LEASE_MINUTES (default 120), RQ_SCRIPTS and NC_SCRIPTS (sibling skills' scripts),
 BANK_METADATA (lanes that get metadata.txt: cq, all, or off; default cq),
-DEVC_IMAGE, IMAGE_CHECK_MINUTES (default 60), DEVC_HUB_URL (Docker Hub tag API URL).
+DEVC_IMAGE, IMAGE_CHECK_MINUTES (default 60), DEVC_HUB_URL (Docker Hub tag API URL),
+SCREEN_HOURS (how long a screened PR waits for its author; default 48).
 """
 import base64, fcntl, json, os, re, shutil, subprocess, sys, tempfile, time, urllib.request
 from datetime import datetime, timedelta, timezone
@@ -47,6 +49,7 @@ SLOT_OWNERLESS_GRACE = 60
 DEVC_IMAGE = os.environ.get("DEVC_IMAGE", "docker.io/nodejs/devcontainer:nightly")
 IMAGE_CHECK_MIN = int(os.environ.get("IMAGE_CHECK_MINUTES", "60"))
 MOVE = "image-move"  # slot owner and PR while a slot moves to the new image
+SCREEN_HOURS = int(os.environ.get("SCREEN_HOURS", "48"))
 
 PRS, DOSSIER, CACHE, LOCKS, ARCHIVE = (BANK / d for d in ("prs", "dossier", "cache", "locks", "archive"))
 for d in (PRS, DOSSIER, CACHE, LOCKS, ARCHIVE):
@@ -54,7 +57,9 @@ for d in (PRS, DOSSIER, CACHE, LOCKS, ARCHIVE):
 
 ENV = dict(os.environ, NODE_REVIEW_BANK=str(BANK), PATH=f"{HERE / 'bin'}:{os.environ['PATH']}")
 
-LANES = ["rereview-asap", "rereview", "cq", "fresh", "fresh-checked", "skip"]
+# screen: PRs that failed the automation screen or were unclear. The user
+# handles them by hand; they need no preparing agent, so they come first.
+LANES = ["screen", "rereview-asap", "rereview", "cq", "fresh", "fresh-checked", "skip"]
 LANE_OF_BUCKET = {"RE-REVIEW-ASAP": "rereview-asap", "RE-REVIEW": "rereview", "CQ-CANDIDATE": "cq"}
 STATES = ["presented", "ready", "needs-run", "stale", "preparing", "waiting", "done"]
 ACTIVE = {"preparing", "needs-run", "ready", "stale"}
@@ -64,7 +69,7 @@ USER_DISPOSITIONS = ("approved", "changes-requested", "commented", "labeled", "u
 FIELDS = ["pr", "url", "title", "author", "lane", "state", "head", "pr_head", "acted_head", "created_at",
           "prepared_at", "presented_at", "updated_at", "my_teams", "rereview_from",
           "needs_run", "disposition", "disposition_at", "snooze_until", "lease", "note",
-          "wait_since", "wait_for"]
+          "wait_since", "wait_for", "screen"]
 SKIP_PATHS = re.compile(r"^(lib/inspector\.js|lib/internal/inspector/|src/inspector/|"
                         r"lib/diagnostics_channel\.js|lib/internal/diagnostics_channel|"
                         r"src/node_diagnostics_channel)")
@@ -475,7 +480,8 @@ def skip_reason(c, e):
 def plan(target=TARGET, show_all=False):
     bank = {e["pr"]: e for e in entries()}
     ci = read_ci()
-    active = [e for e in bank.values() if e["state"] in ACTIVE - {"stale"}]
+    # Screen entries need no preparation, so they don't use the bank's room.
+    active = [e for e in bank.values() if e["state"] in ACTIVE - {"stale"} and e["lane"] != "screen"]
     lines = [f"PREPARE {e['pr']} lane={e['lane']} (stale: re-prepare)"
              for e in sorted(bank.values(), key=rank) if e["state"] == "stale"]
     room = max(0, target - len(active) - len(lines))
@@ -508,6 +514,9 @@ def plan(target=TARGET, show_all=False):
         lines += [f"SKIP {c['pr']} lane={c['lane']} {why}" for c, why in skipped]
         lines += [f"WAIT {e['pr']} lane={e['lane']} {describe_wait(e)}"
                   for e in sorted(bank.values(), key=rank) if e["state"] == "waiting"]
+        lines += [f"SCREEN {e['pr']} {e['state']} {e.get('screen') or '-'}  {e['title'][:60]}"
+                  for e in sorted(bank.values(), key=rank)
+                  if e["lane"] == "screen" and e["state"] in ("ready", "presented")]
     counts = ", ".join(f"{k} {l}" for l in LANES if (k := sum(c["lane"] == l for c in fresh)))
     return lines, counts or "none"
 
@@ -574,13 +583,31 @@ def sync_entry(e, d, rr):
     if e["state"] == "waiting":
         # My own actions don't wake a hold; it waits on others and on time.
         why = wake_reasons(e, d)
+        if why and "screen" in wake_conditions(e) and not any(w.startswith("author responded") for w in why):
+            # The author didn't respond in time: back to the user, with a
+            # recommendation to close it, not into a lane for a review.
+            e.update(state="ready", lane="screen", body=close_body(e), prepared_at=iso(now()),
+                     note="screen: no author response; recommend closing per the moderation policy")
+            save(e)
+            return [f"  {n}: {e['note']}"]
         if why:
             wake(e, why)
             return [f"  {n}: {e['note']}"]
         save(e)
         return []
-    acted = my_actions(d, parse_iso(e.get("created_at")) or now())
+    since = parse_iso(e.get("created_at")) or now()
+    if e["lane"] == "screen":
+        # A close recommendation reuses the entry: only actions after it count.
+        since = max(since, parse_iso(e.get("prepared_at")) or since)
+    acted = my_actions(d, since)
     labels = {l["name"] for l in d["labels"]["nodes"]}
+    if acted and e["lane"] == "screen" and not acted[0].startswith(("approved", "changes-requested")):
+        # The user handled a screened PR (a comment asking for the policy):
+        # wait for the author. A review means they chose to review it after all.
+        disp, when, _ = acted
+        e["disposition"], e["disposition_at"] = disp, when
+        hold(e, screen_conditions(e, author, d["headRefOid"], when), when, "screen: waiting for the author")
+        return [f"  {n}: {disp}, waiting {describe_wait(e)}"]
     if acted:
         disp, when, reviewed = acted
         e["acted_head"] = reviewed or e.get("head")
@@ -641,7 +668,8 @@ def my_actions(d, since):
 
 def wake_conditions(e):
     """A waiting entry's wait_for as a dict: reviews (count), push (the head
-    it waits to move from), landing (when the landing wait ends), ci, until."""
+    it waits to move from), landing (when the landing wait ends), ci, until,
+    author (a comment by this login), and screen (a screen hold)."""
     return dict(t.partition("=")[::2] for t in (e.get("wait_for") or "-").split(",") if t and t != "-")
 
 
@@ -655,9 +683,19 @@ def describe_wait(e):
         parts.append(f"the landing wait ({w['landing']})")
     if "ci" in w:
         parts.append("green CI at the head")
+    if "author" in w:
+        parts.append(f"a comment by @{w['author']}")
     if "until" in w:
-        parts.append(w["until"])
+        parts.append(w["until"] + (" (then a close recommendation)" if "screen" in w else ""))
     return f"since {e.get('wait_since')}, wakes on " + (" or ".join(parts) or "unhold only")
+
+
+def screen_conditions(e, author, head, since):
+    """Wake conditions for a screened PR: the author comments or pushes, or
+    SCREEN_HOURS pass."""
+    until = (parse_iso(since) or now()) + timedelta(hours=SCREEN_HOURS)
+    return {"author": author or e.get("author") or "", "push": (head or e.get("pr_head") or e["head"])[:12],
+            "until": iso(until), "screen": ""}
 
 
 def hold(e, conditions, since, note):
@@ -693,7 +731,11 @@ def wake_reasons(e, d):
     w, why, head = wake_conditions(e), [], d["headRefOid"]
     since = parse_iso(e.get("wait_since")) or now()
     if w.get("push") and not head.startswith(w["push"]):
-        why.append(f"new push {head[:12]}")
+        why.append(("author responded: " if "screen" in w else "") + f"new push {head[:12]}")
+    if w.get("author") and any((c.get("author") or {}).get("login") == w["author"]
+                               and (parse_iso(c.get("createdAt")) or since) > since
+                               for c in (d.get("comments") or {}).get("nodes", [])):
+        why.append(f"author responded: comment by @{w['author']}")
     if "reviews" in w:
         # Distinct reviewers other than me and the author, any review state.
         who = {(r.get("author") or {}).get("login") for r in (d.get("allReviews") or {}).get("nodes", [])
@@ -757,15 +799,27 @@ def prefetch(n):
 def swap_in(n, new, tmp_ref, pr, info, head, lane, rf, cand):
     (new / "pr.json").write_text(pr)
     (new / "diff.patch").write_text(gh("pr", "diff", n, "--repo", REPO))
-    (new / "discussion.json").write_text(discussion(n))
-    ci = subprocess.run([str(NC / "ci-status.sh"), n], env=ENV, text=True,
-                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    (new / "ci.txt").write_text(f"{ci.stdout}(ci-status.sh exit {ci.returncode}, {iso(now())})\n")
+    disc = discussion(n)
+    (new / "discussion.json").write_text(disc)
+    sc = screen(info, json.loads(disc))
+    if sc["result"] != "pass" and "author responded" in ((load(n) or {}).get("note") or ""):
+        # Woken from a screen hold by the author: the user asked for this review.
+        sc = dict(sc, result="pass", why=f"the author responded after the screen hold ({sc['result']} before)")
+    (new / "screen.json").write_text(json.dumps(sc, indent=1))
+    screened = sc["result"] != "pass"
+    ci, gates = None, None
+    if not screened:
+        # A screened PR gets no review, so skip the CI and gates calls.
+        ci = subprocess.run([str(NC / "ci-status.sh"), n], env=ENV, text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        (new / "ci.txt").write_text(f"{ci.stdout}(ci-status.sh exit {ci.returncode}, {iso(now())})\n")
+        gates = write_gates(n, new, info, head, tmp_ref)
     (new / "release-lines.txt").write_text(active_lines())
-    gates = write_gates(n, new, info, head, tmp_ref)
-    if METADATA == "all" or (METADATA == "cq" and lane == "cq"):
+    if not screened and (METADATA == "all" or (METADATA == "cq" and lane == "cq")):
         # After the gh calls: git node metadata calls GitHub and Jenkins itself.
         (new / "metadata.txt").write_text(ncu_metadata(n))
+    if lane == "screen" and not screened:
+        lane = "fresh"
     (new / "meta.json").write_text(json.dumps({
         "pr": n, "head": head, "ref": f"refs/review-bank/{n}", "lane": lane,
         "rereview_from": rf, "clone": str(CLONE), "fetched_at": iso(now())}, indent=1))
@@ -794,11 +848,21 @@ def swap_in(n, new, tmp_ref, pr, info, head, lane, rf, cand):
         e.update(url=f"https://github.com/{REPO}/pull/{n}", title=info["title"],
                  author=(info.get("author") or {}).get("login") or "ghost", state="preparing",
                  head=head, pr_head=head, updated_at=info["updatedAt"], lease=iso(now()), lane=lane,
-                 my_teams=cand.get("my_teams") or e.get("my_teams"), rereview_from=rf)
+                 my_teams=cand.get("my_teams") or e.get("my_teams"), rereview_from=rf,
+                 screen=screen_line(sc))
+        if screened:
+            # No preparing agent: the screen entry is ready for the user as is.
+            e.update(state="ready", lane="screen", lease="-", body=screen_body(n, info, sc),
+                     prepared_at=iso(now()), needs_run="0", note=f"screen {screen_line(sc)}")
         save(e)
         git("update-ref", f"refs/review-bank/{n}", tmp_ref)
         shutil.rmtree(gone, ignore_errors=True)
+    if screened:
+        print(f"{n}: dossier {d}\n  ref refs/review-bank/{n} = {head[:12]}, lane screen, state ready")
+        print(f"  screen {screen_line(sc)}: {sc['why']}. No preparing agent; present it to the user.")
+        return
     print(f"{n}: dossier {d}\n  ref refs/review-bank/{n} = {head[:12]}, lane {lane}, state preparing")
+    print(f"  screen {screen_line(sc)}")
     print("  " + ci.stdout.strip().splitlines()[0] if ci.stdout.strip() else "  ci: no output")
     print(f"  gates: {gates}")
 
@@ -815,6 +879,157 @@ def discussion(n):
     d["rules"] = ("excluded items are not credited and don't count as already raised; "
                   "status resolved-context means hidden as outdated, duplicate, or resolved")
     return json.dumps(d, indent=1)
+
+
+# The automation screen. Node's AI policy (doc/contributing/ai-guidelines.md)
+# allows AI help, but automated tooling must not open pull requests without
+# approval, and a contributor who used AI should disclose it. Collaborators are
+# trusted and skip the screen. For everyone else, the agentscan label and the
+# bot's AgentScan caution are heuristics that trigger the check. Detection is
+# deliberately simple: anything short of a clear pass is unclear, and the user
+# decides.
+AI_WORDS = (r"(?:\bAI\b|\bLLMs?\b|claude|copilot|codex|chatgpt|\bGPT|gemini|cursor|"
+            r"coding agents?|language models?|agentic)")
+AI_TRAILER = re.compile(rf"^(?:assisted-by|generated-by|(?:co-authored-by|made-with):.*{AI_WORDS}).*$", re.I | re.M)
+DISCLOSURE = re.compile(
+    rf"AI[- ]disclosure|AI[- ]assist|{AI_WORDS}[- ](?:assisted|generated|written|helped)|"
+    rf"(?:used|using|with the help of|generated (?:with|by)|written (?:with|by)|assisted by)\s+(?:an?\s+|the\s+)?{AI_WORDS}|"
+    rf"{AI_WORDS}\s+(?:was|were)\s+used", re.I)
+MODERATION = "https://github.com/nodejs/admin/blob/main/Moderation-Policy.md"
+AI_POLICY = "https://github.com/nodejs/node/blob/HEAD/doc/contributing/ai-guidelines.md"
+# README.md sections whose members are collaborators. Emeriti and triagers aren't.
+COLLABORATOR_SECTIONS = ("#### TSC voting members", "#### TSC regular members", "### Collaborators")
+COLLABORATORS_HOURS = 24
+
+
+def collaborators():
+    """Logins (lowercase) of current collaborators, from README.md on
+    upstream/main, cached for a day. Empty if the README can't be read, so
+    the screen then applies to everyone."""
+    p = CACHE / "collaborators.json"
+    try:
+        if time.time() - p.stat().st_mtime < COLLABORATORS_HOURS * 3600:
+            return set(json.loads(p.read_text()))
+    except (OSError, ValueError):
+        pass
+    try:
+        readme = git("show", "upstream/main:README.md")
+    except RuntimeError:
+        return set()
+    logins, section = set(), None
+    for line in readme.splitlines():
+        if line.startswith("#"):
+            section = line.strip() in COLLABORATOR_SECTIONS
+            continue
+        m = section and re.match(r"^\* \[([^\]]+)\]", line)
+        if m:
+            logins.add(m.group(1).lower())
+    if logins:
+        write_atomic(p, json.dumps(sorted(logins)))
+    return logins
+
+
+def snippet(m, text, width=100):
+    if not m:
+        return None
+    a, b = max(0, m.start() - 30), min(len(text), m.end() + 50)
+    return " ".join(text[a:b].split())[:width]
+
+
+def screen(info, disc):
+    """Screen a PR before any review work. Returns a dict: result (pass,
+    unclear, or fail), why, and the signals found."""
+    body = info.get("body") or ""
+    author = (info.get("author") or {}).get("login")
+    if author and author.lower() in collaborators():
+        return dict(result="pass", why="skipped: collaborator", signals=None)
+    labels = [l["name"] for l in info.get("labels") or []]
+    flagged = [l for l in labels if l.startswith("agentscan:")]
+    comments = disc.get("comments") or []
+    bot = [c for c in comments if (c.get("author") or "").startswith("github-actions")]
+    caution = any("AgentScan" in (c.get("body") or "") for c in bot)
+    first = any("first contribution" in (c.get("body") or "") for c in bot)
+    assoc = next((c.get("association") for c in comments + (disc.get("reviews") or [])
+                  if c.get("author") == author), None)
+    messages = "\n".join(c.get("messageBody") or "" for c in info.get("commits") or [])
+    trailers = sorted({" ".join(t.split()) for t in AI_TRAILER.findall(messages)})
+    told = snippet(DISCLOSURE.search(body), body)
+    disclosed = bool(trailers or told)
+    sig = {"agentscan_labels": flagged, "agentscan_caution": caution, "first_contribution": first,
+           "author_association": assoc, "ai_trailers": trailers, "disclosure": told}
+    if not (flagged or caution):
+        why = "not flagged by AgentScan" + ("; AI use disclosed" if disclosed else "")
+        return dict(result="pass", why=why, signals=sig)
+    if not disclosed:
+        return dict(result="fail", why="flagged by AgentScan, with no AI disclosure", signals=sig)
+    # Flagged and disclosed: the flag suggests automated opening, which the
+    # policy forbids without approval, so a disclosure alone doesn't settle it.
+    return dict(result="unclear", why="flagged by AgentScan; AI use disclosed", signals=sig)
+
+
+def screen_line(sc):
+    """The signals on one line, for list, plan, and the entry's screen field."""
+    s = sc["signals"]
+    if not s:
+        return f"{sc['result']}: {sc['why']}"
+    parts = [*s["agentscan_labels"]]
+    if s["agentscan_caution"]:
+        parts.append("AgentScan caution")
+    if s["first_contribution"]:
+        parts.append("first contribution")
+    parts.append("disclosed" if s["disclosure"] or s["ai_trailers"] else "no disclosure")
+    return f"{sc['result']}: " + ", ".join(parts)
+
+
+def screen_body(n, info, sc):
+    """A screen entry's body: the signals, the policy, and an outline for the
+    user's comment. An outline, not a comment: the user writes it."""
+    s, author = sc["signals"], (info.get("author") or {}).get("login") or "ghost"
+    found = lambda v: f"found: \"{v}\"" if v else "none found"
+    lines = [f"## [#{n}](https://github.com/{REPO}/pull/{n}) {info['title']} (automation screen)", "",
+             "### Screen", "",
+             f"Result: **{sc['result']}**, {sc['why']}. No review was prepared.", "",
+             f"- Author: @{author}, association {s['author_association'] or 'unknown (no comment by them)'}"
+             + (", first contribution (github-actions welcome comment)" if s["first_contribution"] else ""),
+             f"- AgentScan: label {', '.join(s['agentscan_labels']) or 'none'}; caution in the github-actions "
+             f"comment: {'yes' if s['agentscan_caution'] else 'no'}",
+             f"- AI disclosure in the PR body: {found(s['disclosure'])}",
+             f"- AI trailers in the commits: {', '.join(s['ai_trailers']) or 'none'}", "",
+             "Read the PR body and commits yourself before deciding: the screen is pattern matching.", "",
+             "### Policy", "",
+             f"[AI use policy]({AI_POLICY}):", "",
+             "- Pull requests must not be opened by automated tooling without approval in advance.",
+             "- A contributor who used AI should disclose it, and must understand, test, and verify what they submit.",
+             "- AI-generated pull requests the contributor hasn't understood, tested, and verified are subject "
+             "to closure without further review.",
+             f"- Messages generated entirely by AI may be removed under the [moderation policy]({MODERATION}).", "",
+             "### Outline for your comment", "",
+             "- Point to the github-actions welcome comment (the AgentScan caution) and the AI use policy.",
+             "- Ask them to confirm they follow the contribution policies.",
+             "- Name what's missing: " + ("the AI disclosure, and confirmation that a person opened the PR and "
+             "will handle review." if not (s["disclosure"] or s["ai_trailers"]) else
+             "confirmation that a person, not automated tooling, opened the PR and will handle review."),
+             "- Say you'll review once they respond.", "",
+             "### Next", "",
+             f"After you comment, `sync` holds it for {SCREEN_HOURS} hours. A comment or push by @{author} wakes it "
+             "for a real review. With no response, it comes back with a recommendation to close it per the "
+             "moderation policy."]
+    return "\n".join(lines) + "\n"
+
+
+def close_body(e):
+    """A screen entry whose author didn't respond in time."""
+    return "\n".join([
+        f"## [#{e['pr']}]({e['url']}) {e['title']} (automation screen: no response)", "",
+        "### Screen", "",
+        f"No comment or push by @{e.get('author', 'the author')} in {SCREEN_HOURS} hours since "
+        f"{e.get('wait_since')}. Screen at prefetch: {e.get('screen') or '-'}.", "",
+        f"Recommend closing it per the [AI use policy]({AI_POLICY}) (AI-generated pull requests that weren't "
+        f"verified \"will be subject to closure without additional review\") and the "
+        f"[moderation policy]({MODERATION}).", "",
+        "### Outline for your closing comment", "",
+        "- Refer to your earlier comment and that there was no response.",
+        "- Say they can reopen it, or open a new PR, once they can follow the contribution policies.", ""])
 
 
 METADATA = os.environ.get("BANK_METADATA", "cq")  # which lanes get metadata.txt: cq, all, or off
@@ -1420,7 +1635,8 @@ def list_cmd(show_all, target=TARGET):
             continue
         snz = " (snoozed)" if snoozed(e) else ""
         extra = f" needs-run={e['needs_run']}" if e["state"] == "needs-run" else \
-            f" ({describe_wait(e)})" if e["state"] == "waiting" else ""
+            f" ({describe_wait(e)})" if e["state"] == "waiting" else \
+            f" (screen {e.get('screen') or '-'})" if e["lane"] == "screen" else ""
         disp = f" -> {e['disposition']}" if e["state"] == "done" else ""
         print(f"  {e['state']:<9} {e['lane']:<13} https://github.com/{REPO}/pull/{e['pr']}{extra}{snz}{disp}  {e['title'][:60]}")
 
@@ -1514,9 +1730,12 @@ def hold_cmd(n, args):
     """Hold a PR until others review it, it gets a push, or --until passes.
     Works for a candidate with no entry yet. No GitHub call: the push
     condition uses the latest head the bank has seen."""
-    n, until, reviews, note = str(int(n)), None, "1", []
+    n, until, reviews, note, scr = str(int(n)), None, "1", [], False
     while args:
         a = args.pop(0)
+        if a == "--screen":
+            scr = True
+            continue
         if a in ("--until", "--until-reviews") and not args:
             die(f"{a} needs a value", 2)
         if a == "--until":
@@ -1540,6 +1759,14 @@ def hold_cmd(n, args):
                  "created_at": iso(now()), "updated_at": c["updated"], "my_teams": c.get("my_teams"),
                  "rereview_from": c.get("rereview_from"), "disposition": "-"}
         head = e["pr_head"] if e.get("pr_head") not in (None, "-") else e["head"]
+        if scr:
+            # After a comment asking the author to follow the AI policy.
+            w = screen_conditions(e, e.get("author"), head, iso(now()))
+            if until:
+                w["until"] = until
+            hold(e, w, iso(now()), "screen: waiting for the author" + (f": {' '.join(note)}" if note else ""))
+            show(e, header_only=True)
+            return
         w = {"reviews": reviews} if int(reviews) else {}
         w["push"] = head[:12]
         if until:

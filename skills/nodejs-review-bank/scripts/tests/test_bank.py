@@ -16,7 +16,8 @@ RQ_REAL = (SCRIPTS / "../../nodejs-review-queue/scripts").resolve()
 NC_REAL = (SCRIPTS / "../../nodejs-contribute/scripts").resolve()
 FIELDS = ["pr", "url", "title", "author", "lane", "state", "head", "pr_head", "acted_head", "created_at",
           "prepared_at", "presented_at", "updated_at", "my_teams", "rereview_from",
-          "needs_run", "disposition", "disposition_at", "snooze_until", "lease", "note"]
+          "needs_run", "disposition", "disposition_at", "snooze_until", "lease", "note",
+          "wait_since", "wait_for", "screen"]
 A, B, C = "a" * 40, "b" * 40, "c" * 40
 
 
@@ -242,7 +243,7 @@ class BankTest(unittest.TestCase):
         self.assertEqual(self.entry(5)["state"], "ready")
 
 
-    def make_clone(self, pr_head_commit_msg="pr"):
+    def make_clone(self, pr_head_commit_msg="pr", readme=None):
         """A clone whose upstream has main and refs/pull/5/head. Returns the PR head sha."""
         up = self.tmp / "upstream.git"
         work = self.tmp / "work"
@@ -254,6 +255,9 @@ class BankTest(unittest.TestCase):
             g("config", k, v, cwd=work)
         (work / "f").write_text("main\n")
         g("add", "f", cwd=work)
+        if readme is not None:
+            (work / "README.md").write_text(readme)
+            g("add", "README.md", cwd=work)
         g("commit", "-qm", "main", cwd=work)
         g("push", "-q", str(up), "main", cwd=work)
         (work / "f").write_text("pr\n")
@@ -984,6 +988,180 @@ class BankTest(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertEqual(p.stdout.split(), ["2026-11-18T12:00:00Z", "2026-11-22T12:00:00Z",
                                             "2026-11-25T12:00:00Z", "2026-11-19T12:00:00Z"])
+
+
+    # The automation screen.
+
+    WELCOME = ("Welcome to Node.js, and thank you for your first contribution!\n\n> [!CAUTION]\n"
+               "> AgentScan found account activity patterns that may be consistent with automation.")
+
+    README = ("# Node.js\n\n### TSC (Technical Steering Committee)\n\n#### TSC voting members\n\n"
+              "* [TSC-Voting](https://example.com/tsc-voting) -\n  **T**\n\n#### TSC emeriti members\n\n"
+              "* [tsc-emeritus](https://example.com/tsc-emeritus) -\n  **E**\n\n### Collaborators\n\n"
+              "* [Collab-Active](https://example.com/collab-active) -\n  **C**\n\n### Collaborator emeriti\n\n"
+              "* [collab-emeritus](https://example.com/collab-emeritus) -\n  **E**\n\n### Triagers\n\n"
+              "* [someone](https://example.com/someone) -\n  **S**\n")
+
+    def prefetch_screen(self, body="", labels=(), messages=(), comments=(), author="someone"):
+        """Prefetch PR 5 with this body, labels, commit messages, PR comments, and author."""
+        head = self.make_clone(readme=self.README)
+        self.cache("release-lines.txt", "active release lines: v22 v24 v26\n")
+        rules = self.prefetch_rules(head)
+        pr = rules[1]["stdout"]
+        pr["body"], pr["labels"] = body, [{"name": l} for l in labels]
+        pr["author"] = {"login": author}
+        pr["commits"] = [{"oid": head, "messageHeadline": "x", "messageBody": m} for m in messages]
+        disc = rules[3]["stdout"]["data"]["repository"]["pullRequest"]["comments"]
+        disc["nodes"] = [{"author": {"login": who}, "authorAssociation": assoc, "createdAt": ago(hours=2),
+                          "isMinimized": False, "minimizedReason": None, "body": text}
+                         for who, assoc, text in comments]
+        disc["totalCount"] = len(comments)
+        self.rules(rules)
+        out = self.run_bank("prefetch", "5").stdout
+        return head, out, json.loads((self.bank / "dossier" / "5" / "screen.json").read_text())
+
+    FLAGGED = dict(labels=["stream", "agentscan:automated-account"])
+
+    def test_screen_passes_a_pr_with_no_automation_signals(self):
+        _, out, sc = self.prefetch_screen(body="Fixes a bug.")
+        self.assertEqual(sc["result"], "pass")
+        self.assertEqual(self.entry(5)["state"], "preparing")
+        self.assertIn("gates:", out)
+
+    def test_screen_skips_collaborators_even_when_flagged(self):
+        for login in ("Collab-Active", "tsc-voting"):
+            with self.subTest(login=login):
+                shutil.rmtree(self.tmp / "clone", ignore_errors=True)
+                shutil.rmtree(self.tmp / "work", ignore_errors=True)
+                shutil.rmtree(self.tmp / "upstream.git", ignore_errors=True)
+                shutil.rmtree(self.bank / "dossier", ignore_errors=True)
+                (self.bank / "prs" / "5.md").unlink(missing_ok=True)
+                _, _, sc = self.prefetch_screen(body="No disclosure.", author=login, **self.FLAGGED)
+                self.assertEqual((sc["result"], sc["why"]), ("pass", "skipped: collaborator"))
+                self.assertEqual(self.entry(5)["lane"], "fresh")
+                self.assertEqual(self.entry(5)["screen"], "pass: skipped: collaborator")
+
+    def test_screen_does_not_trust_emeriti_or_triagers(self):
+        cached = json.loads((self.bank / "cache" / "collaborators.json").read_text()) \
+            if (self.bank / "cache" / "collaborators.json").exists() else None
+        self.assertIsNone(cached)
+        _, _, sc = self.prefetch_screen(body="No disclosure.", author="someone", **self.FLAGGED)
+        self.assertEqual(sc["result"], "fail")
+        logins = json.loads((self.bank / "cache" / "collaborators.json").read_text())
+        self.assertEqual(logins, ["collab-active", "tsc-voting"])
+
+    def test_screen_passes_an_unflagged_pr_that_discloses_ai_use(self):
+        _, out, sc = self.prefetch_screen(
+            body="AI disclosure: Claude Code was used to write the change.",
+            labels=["http"], messages=["fix\n\nAssisted-by: a closed-source coding agent\nSigned-off-by: x"])
+        self.assertEqual(sc["result"], "pass", sc)
+        self.assertEqual(sc["signals"]["ai_trailers"], ["Assisted-by: a closed-source coding agent"])
+        e = self.entry(5)
+        self.assertEqual((e["state"], e["lane"]), ("preparing", "fresh"))
+        self.assertEqual(e["screen"], "pass: disclosed")
+
+    def test_screen_fails_a_flagged_pr_with_no_disclosure_and_needs_no_agent(self):
+        _, out, sc = self.prefetch_screen(
+            body="This fixes duplicate bytes in Utf8Stream.", comments=[("github-actions", "CONTRIBUTOR", self.WELCOME)],
+            **self.FLAGGED)
+        self.assertEqual(sc["result"], "fail")
+        self.assertTrue(sc["signals"]["agentscan_caution"])
+        self.assertTrue(sc["signals"]["first_contribution"])
+        e = self.entry(5)
+        self.assertEqual((e["state"], e["lane"]), ("ready", "screen"))
+        self.assertIn("No preparing agent", out)
+        self.assertIn("### Outline for your comment", e["body"])
+        # No CI or gates calls for a screened PR.
+        self.assertFalse(any("statusCheckRollup" in " ".join(c) for c in self.calls()))
+        self.assertFalse((self.bank / "dossier" / "5" / "ci.txt").exists())
+        self.assertIn("(screen fail: agentscan:automated-account, AgentScan caution, first contribution, "
+                      "no disclosure)", self.run_bank("list").stdout)
+        self.assertIn("SCREEN 5 ready fail:", self.run_bank("plan", "--all").stdout)
+        shown = self.run_bank("present").stdout
+        self.assertIn("(automation screen)", shown)
+
+    def test_screen_is_unclear_when_a_flagged_pr_discloses_ai_use(self):
+        _, _, sc = self.prefetch_screen(body="This change was generated with Copilot.", **self.FLAGGED)
+        self.assertEqual(sc["result"], "unclear")
+        self.assertEqual(sc["why"], "flagged by AgentScan; AI use disclosed")
+        self.assertEqual(self.entry(5)["lane"], "screen")
+
+    def test_screen_entries_do_not_use_the_banks_room(self):
+        self.write_entry(1, state="ready", lane="screen")
+        self.cache("candidates.json", json.dumps({"9": {"title": "t", "draft": False, "state": "OPEN",
+                                                        "updated": ago(minutes=1), "head": A, "author": "x",
+                                                        "paths": ["lib/net.js"]}}))
+        self.cache("queue.tsv", "9\tnet\t-\n")
+        self.assertIn("PREPARE 9", self.run_bank("plan", "--target", "1").stdout)
+
+    def screen_hold(self):
+        """A screen entry for PR 5 by `bot-ish`, then my comment on it."""
+        self.write_entry(5, state="ready", lane="screen", author="bot-ish", prepared_at=ago(hours=1),
+                         created_at=ago(hours=1), screen="fail: agentscan:automated-account")
+        mine = {"author": {"login": "me"}, "createdAt": ago(minutes=30), "body": "please see the AI policy"}
+        node = pr_node(5, A, author="bot-ish", comments=[mine])
+        self.rules([self.sync_rule(node)])
+        self.run_bank("sync")
+        return mine
+
+    def test_a_comment_on_a_screen_entry_waits_48_hours_for_the_author(self):
+        self.screen_hold()
+        e = self.entry(5)
+        self.assertEqual(e["state"], "waiting")
+        w = dict(t.partition("=")[::2] for t in e["wait_for"].split(","))
+        self.assertEqual(w["author"], "bot-ish")
+        self.assertEqual(w["push"], A[:12])
+        self.assertIn("screen", w)
+        until = datetime.strptime(w["until"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        since = datetime.strptime(e["wait_since"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        self.assertEqual(until - since, timedelta(hours=48))
+
+    def test_an_author_comment_wakes_a_screen_hold_for_a_real_review(self):
+        mine = self.screen_hold()
+        theirs = {"author": {"login": "bot-ish"}, "createdAt": ago(minutes=1), "body": "I wrote and tested it."}
+        self.rules([self.sync_rule(pr_node(5, A, author="bot-ish", comments=[mine, theirs]))])
+        self.run_bank("sync")
+        e = self.entry(5)
+        self.assertEqual(e["state"], "done")
+        self.assertEqual(e["note"], "woke: author responded: comment by @bot-ish")
+        # The next prefetch skips the screen: the user asked for this review.
+        _, out, sc = self.prefetch_screen(body="No disclosure.", labels=["agentscan:automated-account"])
+        self.assertEqual(sc["result"], "pass")
+        self.assertEqual((self.entry(5)["state"], self.entry(5)["lane"]), ("preparing", "fresh"))
+
+    def test_an_author_push_wakes_a_screen_hold(self):
+        mine = self.screen_hold()
+        self.rules([self.sync_rule(pr_node(5, B, author="bot-ish", comments=[mine]))])
+        self.run_bank("sync")
+        self.assertEqual(self.entry(5)["note"], f"woke: author responded: new push {B[:12]}")
+
+    def test_no_author_response_brings_back_a_close_recommendation(self):
+        mine = self.screen_hold()
+        e = self.entry(5)
+        # Pretend the 48 hours passed.
+        e["wait_for"] = e["wait_for"].replace(e["wait_for"].split("until=")[1].split(",")[0], ago(minutes=1))
+        self.write_entry(5, **{k: v for k, v in e.items() if k not in ("body", "pr")})
+        self.rules([self.sync_rule(pr_node(5, A, author="bot-ish", comments=[mine]))])
+        self.run_bank("sync")
+        e = self.entry(5)
+        self.assertEqual((e["state"], e["lane"]), ("ready", "screen"))
+        self.assertEqual(e["note"], "screen: no author response; recommend closing per the moderation policy")
+        self.assertIn("Recommend closing it", e["body"])
+        # My earlier comment doesn't start another hold.
+        self.rules([self.sync_rule(pr_node(5, A, author="bot-ish", comments=[mine]))])
+        self.run_bank("sync")
+        self.assertEqual(self.entry(5)["state"], "ready")
+
+    def test_hold_screen_sets_the_author_and_48_hours(self):
+        self.write_entry(5, state="done", lane="fresh", author="bot-ish", disposition="commented")
+        self.run_bank("hold", "5", "--screen", "asked", "for", "attestation")
+        e = self.entry(5)
+        self.assertEqual(e["note"], "screen: waiting for the author: asked for attestation")
+        self.assertIn("author=bot-ish", e["wait_for"])
+        self.assertIn("screen", e["wait_for"])
+        self.assertIn("a comment by @bot-ish", self.run_bank("list").stdout)
+
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -133,9 +133,32 @@ Rank by bucket, but present one PR's action at a time. A one-line count per buck
 
 ```bash
 gh pr view <n> --repo nodejs/node \
-  --json title,body,author,baseRefName,reviewDecision,labels,mergeable,mergeStateStatus
+  --json title,body,author,baseRefName,reviewDecision,labels,mergeable,mergeStateStatus,commits
 gh pr diff <n> --repo nodejs/node
 ```
+
+**Automation screen, before reading the diff.** Node.js's [AI use policy](https://github.com/nodejs/node/blob/HEAD/doc/contributing/ai-guidelines.md) allows AI help, with rules:
+
+- Pull requests must not be opened by automated tooling without approval in advance.
+- A contributor who used AI should disclose it, and must understand, test, and verify what they submit.
+- AI-generated pull requests the contributor hasn't understood, tested, and verified "will be subject to closure without additional review".
+- Messages generated entirely by AI may be removed under the [moderation policy](https://github.com/nodejs/admin/blob/main/Moderation-Policy.md).
+
+Skip the screen for collaborators: anyone in the TSC voting or regular members or *Collaborators* sections of `README.md` on `upstream/main`. Emeriti and triagers don't count, and GitHub's `MEMBER` association doesn't either, since triagers have it too.
+
+For everyone else, check for these signals:
+
+- An `agentscan:*` label, or the AgentScan caution in the github-actions welcome comment. Both are heuristics, not proof.
+- AI disclosure in the PR body, and AI trailers such as `Assisted-by:` in the commits.
+- Agent-style work: a templated body, many similar PRs, a first contribution.
+
+Outcomes:
+
+- **Pass:** not flagged by AgentScan, whether or not AI use is disclosed. AI use is fine. Review normally, and note any disclosure in one line under process state.
+- **Fail:** flagged by AgentScan, with no AI disclosure.
+- **Unclear:** flagged by AgentScan, with an AI disclosure, or anything else you can't call. The flag suggests automated opening, which the policy forbids without approval, so a disclosure alone doesn't settle it.
+
+On fail or unclear, don't review. Give the user the signals and an outline for their comment: link the github-actions welcome comment and the AI use policy, ask the author to confirm they follow the contribution policies, and name what's missing. Wait 48 hours. If the author responds as a person (a comment or a push), review it. If not, recommend closing it per the AI use policy and the moderation policy. The user posts every comment and closes the PR.
 
 **CI status:** never conclude it from `gh pr checks`. GitHub's check list mixes stale nodes with the current Jenkins run and has caused a wrong "CI failing" call. Use `nodejs-contribute`'s `scripts/ci-status.sh <pr>`, which runs `ncu-ci` against the current head.
 
@@ -174,7 +197,7 @@ Give a structured summary in chat:
   - **No CI run** (no `node-test-pull-request` job, `needs-ci` present, `ncu-ci` finds no run): recommend adding `request-ci`.
   - **Stale or out-of-date CI:** if `mergeable: MERGEABLE`, recommend adding `request-ci`. The CI job rebases onto `main` itself (`REBASE_ONTO`), so don't ask the author to rebase. Only if `mergeable: CONFLICTING`, or CI shows a rebase `BUILD_FAILURE`, recommend asking the author to rebase.
   - **A CI run, at least 1 approval (2 TSC for `semver-major`), no outstanding comments, no conflicts:** recommend adding `author ready`, and removing it if that stops being true. See `nodejs-contribute`'s *`author ready`*.
-  - **Doc-only, test-only, or a clean regression fix:** recommend `fast-track`. It needs two 👍 on the bot's fast-track comment, plus approvals and green CI.
+  - **Doc-only, test-only, or a clean regression fix:** recommend `fast-track`. The bot then posts a comment that needs two 👍 from other collaborators. The collaborator who adds the label doesn't 👍 it. It also needs approvals and green CI.
   - **All gates met (approvals, wait time, CI):** note it's land-ready via `commit-queue`. Ignore a `BLOCKED` merge button or "commits must have verified signatures". That's a GitHub ruleset gate Node.js doesn't use for landing, not a `commit-queue` gate.
   - **Abandoned or parked by the author:** use the [author association split](#c3-split-by-author-association).
 - **Review outline (only if asked):** short notes the user writes their review from: the points to raise, each with its `file:line`, evidence, and any suggested code. No finished prose. Once the user writes their text, proofread it per their writing rules: fix mechanical and factual errors, and list anything else as a suggestion.
@@ -185,7 +208,7 @@ From `doc/contributing/collaborator-guide.md`. Full CI and landing mechanics are
 
 - **Approvals:** two non-author collaborators, or one once the PR has been open over 7 days. Wait 48 hours (72 over a weekend).
 - **`author ready`:** a CI run, at least 1 approval (2 TSC for `semver-major`), no outstanding comments, and no conflicts. It's a triage signal, not a landing gate.
-- **`fast-track`:** doc-only, test-only, or a clean regression fix. Two 👍 on the bot comment, plus approvals and green CI.
+- **`fast-track`:** doc-only, test-only, or a clean regression fix. Two 👍 on the bot comment from other collaborators (not the one who added the label), plus approvals and green CI.
 - **CI action:** run `ci-status.sh <pr>`. No run, or stale on a `MERGEABLE` PR, means recommend `request-ci`. A real failure in the PR's subsystem is a finding. An unrelated flake or infra failure gets a note.
 
 **Abandoned or stalled PRs** (`doc/contributing/pull-requests.md` "Abandoned or stalled pull requests", and the "Closing issues and pull requests" section of `collaborator-guide.md`):

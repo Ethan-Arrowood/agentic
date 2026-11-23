@@ -33,12 +33,11 @@ For **reviewing/triaging other people's** PRs (read-only), use the `nodejs-revie
   Check with `git rev-parse --abbrev-ref <branch>@{upstream}` — it must print `origin/<branch>`. Only `main` should track `upstream/main`.
 - **Keep `origin/main` current.** A stale fork main (it drifted 2281 commits once) is what makes GitHub's "Update branch" button offer bogus conflicts and tempt a merge commit. `git push origin main` whenever main is fast-forwarded.
 - **Don't chase the tip when rebasing.** nodejs/node lands ~1 commit per 30 min, so any base is hours-old immediately; that is fine. Jenkins `node-test-pull-request` rebases onto current `origin/main` itself (`REBASE_ONTO`) before building. Rebase when the PR is genuinely `CONFLICTING`/far behind, not to match `upstream/main` exactly. Verify with `git merge-tree --write-tree upstream/main HEAD` rather than by comparing SHAs.
-- **Commit trailers (DCO) — NOT `Co-Authored-By`.** Every commit ends with:
+- **Commit trailers: DCO sign-off only. No `Co-Authored-By`, no `Assisted-by`.** Every commit ends with:
   ```
-  Assisted-by: <model>
   Signed-off-by: Ethan Arrowood <ethan@arrowood.dev>
   ```
-  (`<model>` is the human-readable name of the model running, with the agent's usual attribution email if it has one.) nodejs requires the DCO `Signed-off-by` and uses `Assisted-by` for AI assistance. This overrides the global `Co-Authored-By` default.
+  nodejs requires the DCO `Signed-off-by`. Its AI use policy (`doc/contributing/ai-guidelines.md`, *Naming AI tools in disclosures*) recommends keeping for-profit model names out of commit messages, so AI use is disclosed in the PR description only (the posting footer, plus how the change was verified). This overrides the global `Co-Authored-By` default.
 - **Don't keep workflow notes in an untracked agent instruction file in the clone.** It won't travel across machines. This skill is the portable source of truth.
 
 ## One-time setup (per machine)
@@ -149,7 +148,7 @@ With the devcontainer, prefix each command below with `devc.sh run` (the local f
 ## Committing
 
 - Subsystem-prefix the summary (`net: …`, `http: …`); follow `doc/contributing/pull-requests.md` commit-message guidelines.
-- **Trailers: `Assisted-by:` + `Signed-off-by:` (DCO), never `Co-Authored-By`** — see Repo baseline.
+- **Trailers: `Signed-off-by:` (DCO) only, never `Co-Authored-By` or `Assisted-by`.** Disclose AI use in the PR description. See Repo baseline.
 - Commits authored as the user (repo git config). Pushing a rebase/amend to your PR branch on `origin` needs `--force-with-lease`; adding a commit on top is a plain push.
 
 ## CI on your PR — `scripts/ci-status.sh <pr>`

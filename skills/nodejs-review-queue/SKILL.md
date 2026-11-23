@@ -165,6 +165,7 @@ Give a structured summary in chat:
 - **What it does:** one short paragraph. Name the subsystems and which of the user's teams they fall under.
 - **Assessment:** would approve, would request changes, or needs discussion, with confidence. Frame it as a read for the user to form their own view.
 - **Findings:** tagged 🔴 blocker, 🟠 should fix, 🟡 nit, or 🟢 note, with `file:line` links. Weight correctness, behavior and ABI regressions, semver implications, and test coverage.
+  - A commit trailer that names a for-profit AI model (`Assisted-by: <brand>`) is at most an optional 🟡 nit: the [AI use policy](https://github.com/nodejs/node/blob/main/doc/contributing/ai-guidelines.md#naming-ai-tools-in-disclosures) recommends anonymizing it or keeping it to the PR description, but doesn't require it.
 - **Missing classification labels:** always check. Flagging a missing label is a real review contribution.
   - `semver-major` (breaking change, including silent behavior becoming a throw), `semver-minor` (new public API), `notable-change` (CHANGELOG-worthy).
   - `dont-land-on-vN.x` only when the change would cherry-pick cleanly onto an active release line it shouldn't reach, and precedent for the subsystem doesn't already keep it off. Most PRs need none, and releasers add these labels themselves. `lts-watch-vN.x` for a fix an LTS line should consider. Follow `nodejs-contribute`'s *Release-line labels*, which has the precedent, cherry-pick, and active-line checks.

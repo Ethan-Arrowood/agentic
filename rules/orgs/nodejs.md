@@ -4,12 +4,12 @@ Applies to repos in the `nodejs` GitHub org (`nodejs/node`, `nodejs/undici`, …
 
 ## `nodejs/node`
 
-- **Commit trailers:** use the project's DCO convention instead of the default `Co-Authored-By`. Take your tool's trailer from Per-tool settings in the Git rules, change `Co-Authored-By` to `Assisted-by`, and follow it with a sign-off. For example, in Claude Code:
+- **Commit trailers:** only the DCO sign-off. No `Co-Authored-By` and no `Assisted-by`:
   ```text
-  Assisted-by: <model> <noreply@anthropic.com>
   Signed-off-by: Ethan Arrowood <ethan@arrowood.dev>
   ```
   The signed-off-by trailer should be generated using the `git commit -s` option, but can also be manually added depending on how the commit is being created.
+- **AI disclosure goes in the PR description, not the commits.** The project's [AI use policy](https://github.com/nodejs/node/blob/main/doc/contributing/ai-guidelines.md#naming-ai-tools-in-disclosures) recommends keeping for-profit model names out of commit messages. The Posting rules' footer is the disclosure. The policy also asks what I did to verify the change, so the PR description should say that too.
 - **Which `node`:** to run the project's code or tests, use the container's `out/Release/node` (`devc.sh run out/Release/node …`), not the fnm version from the Node.js runtime rule. Use fnm's Node only for tooling outside the build.
 - See the `nodejs-contribute` skill for the build/test/commit/land workflow.
 

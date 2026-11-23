@@ -996,11 +996,11 @@ class BankTest(unittest.TestCase):
                "> AgentScan found account activity patterns that may be consistent with automation.")
 
     README = ("# Node.js\n\n### TSC (Technical Steering Committee)\n\n#### TSC voting members\n\n"
-              "* [TscMember](https://github.com/TscMember) -\n  **T**\n\n#### TSC emeriti members\n\n"
-              "* [OldTsc](https://github.com/OldTsc) -\n  **O**\n\n### Collaborators\n\n"
-              "* [ShogunPanda](https://github.com/ShogunPanda) -\n  **Paolo**\n\n### Collaborator emeriti\n\n"
-              "* [OldCollab](https://github.com/OldCollab) -\n  **O**\n\n### Triagers\n\n"
-              "* [someone](https://github.com/someone) -\n  **S**\n")
+              "* [TSC-Voting](https://example.com/tsc-voting) -\n  **T**\n\n#### TSC emeriti members\n\n"
+              "* [tsc-emeritus](https://example.com/tsc-emeritus) -\n  **E**\n\n### Collaborators\n\n"
+              "* [Collab-Active](https://example.com/collab-active) -\n  **C**\n\n### Collaborator emeriti\n\n"
+              "* [collab-emeritus](https://example.com/collab-emeritus) -\n  **E**\n\n### Triagers\n\n"
+              "* [someone](https://example.com/someone) -\n  **S**\n")
 
     def prefetch_screen(self, body="", labels=(), messages=(), comments=(), author="someone"):
         """Prefetch PR 5 with this body, labels, commit messages, PR comments, and author."""
@@ -1029,7 +1029,7 @@ class BankTest(unittest.TestCase):
         self.assertIn("gates:", out)
 
     def test_screen_skips_collaborators_even_when_flagged(self):
-        for login in ("ShogunPanda", "tscmember"):
+        for login in ("Collab-Active", "tsc-voting"):
             with self.subTest(login=login):
                 shutil.rmtree(self.tmp / "clone", ignore_errors=True)
                 shutil.rmtree(self.tmp / "work", ignore_errors=True)
@@ -1048,7 +1048,7 @@ class BankTest(unittest.TestCase):
         _, _, sc = self.prefetch_screen(body="No disclosure.", author="someone", **self.FLAGGED)
         self.assertEqual(sc["result"], "fail")
         logins = json.loads((self.bank / "cache" / "collaborators.json").read_text())
-        self.assertEqual(logins, ["shogunpanda", "tscmember"])
+        self.assertEqual(logins, ["collab-active", "tsc-voting"])
 
     def test_screen_passes_an_unflagged_pr_that_discloses_ai_use(self):
         _, out, sc = self.prefetch_screen(

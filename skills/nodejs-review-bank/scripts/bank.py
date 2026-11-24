@@ -904,6 +904,20 @@ def wake_reasons(e, d):
     return why
 
 
+def refused(n, info, disp):
+    """Finish the entry for a PR prefetch won't prepare, creating one if
+    needed. Its updated_at comes from GitHub, so skip_reason prefers it over
+    an older cached candidate."""
+    with entry_lock(n):
+        e = load(n) or {"pr": n, "url": f"https://github.com/{REPO}/pull/{n}", "lane": "fresh",
+                        "head": info.get("headRefOid") or "-", "created_at": iso(now()), "disposition": "-"}
+        e["title"] = info.get("title") or e.get("title") or "-"
+        e["author"] = (info.get("author") or {}).get("login") or e.get("author") or "-"
+        e["pr_head"] = info.get("headRefOid") or e.get("pr_head") or "-"
+        e["updated_at"] = info.get("updatedAt") or iso(now())
+        finish(e, disp)
+
+
 def prefetch(n):
     """Everything a preparing agent needs, so it never calls gh itself. The
     new dossier and ref replace the old ones only after the fetched head
@@ -914,8 +928,12 @@ def prefetch(n):
             "mergeStateStatus,files,commits,createdAt,updatedAt,isDraft,state")
     info = json.loads(pr)
     if info.get("state") != "OPEN" or info.get("isDraft"):
-        # The cached candidate can be up to REFRESH_MINUTES old.
-        die(f"{n} is {'a draft' if info.get('isDraft') else info.get('state', '?').lower()}; not preparing it", 4)
+        # The cached candidate can be up to REFRESH_MINUTES old, and longer
+        # while the refresh is dormant. Record what GitHub said, so plan
+        # stops offering the PR until the cache catches up.
+        disp = "draft" if info.get("state") == "OPEN" else info.get("state", "?").lower()
+        refused(n, info, disp)
+        die(f"{n} is {'a draft' if disp == 'draft' else disp}; not preparing it", 4)
 
     fetch_upstream()
     tmp_ref = f"refs/review-bank/tmp/{n}-{os.getpid()}"

@@ -528,7 +528,29 @@ class BankTest(unittest.TestCase):
         self.rules(rules)
         p = self.run_bank("prefetch", "5", check=False)
         self.assertEqual(p.returncode, 4, p.stdout + p.stderr)
-        self.assertFalse((self.bank / "prs" / "5.md").exists())
+        self.assertFalse((self.bank / "dossier" / "5").exists())
+        e = self.entry(5)
+        self.assertEqual((e["state"], e["disposition"]), ("done", "closed"))
+
+    def test_plan_stops_offering_a_pr_prefetch_found_closed(self):
+        # The cached queue still lists the PR, as it does while the refresh
+        # is dormant. A woken hold made it plannable again.
+        head = self.make_clone()
+        self.cache("release-lines.txt", "active release lines: v22 v24 v26\n")
+        self.candidate_cache(5, head=A, updated=ago(hours=3))
+        self.write_entry(5, state="done", lane="fresh", head=A, pr_head=A, acted_head=A,
+                         disposition=f"approved @{A[:12]}", wait_since=ago(hours=2),
+                         updated_at=ago(hours=3))
+        self.assertIn("PREPARE 5", self.run_bank("plan").stdout)
+        rules = self.prefetch_rules(head)
+        for r in rules:
+            if r["match"] == ["pr", "view", "5"]:
+                r["stdout"]["state"] = "MERGED"
+                r["stdout"]["updatedAt"] = ago(minutes=1)
+        self.rules(rules)
+        self.assertEqual(self.run_bank("prefetch", "5", check=False).returncode, 4)
+        self.assertEqual(self.entry(5)["disposition"], "merged")
+        self.assertNotIn("PREPARE 5", self.run_bank("plan").stdout)
 
     def test_a_commit_queue_failed_label_does_not_finish_a_cq_entry(self):
         self.write_entry(5, state="ready", lane="cq")

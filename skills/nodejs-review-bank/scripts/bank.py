@@ -5,7 +5,7 @@ Deterministic parts of the skill. Every gh call goes through the bin/gh shim
 (one gh call at a time across processes) and backs off on GitHub's secondary
 rate limit. Read-only on GitHub: nothing here posts, labels, or reviews.
 
-  bank.py tick [--refresh] [--target N]   refresh candidates, sync, prune, plan
+  bank.py tick [--refresh] [--now] [--target N]   refresh candidates, sync, prune, plan
   bank.py sync [PR...]                    re-read bank entries from GitHub, prune
   bank.py plan [--target N] [--all]       what to prepare next, in priority order (--all adds skips)
   bank.py list [--all]                    the bank, by priority
@@ -25,7 +25,14 @@ REPO, ME, BANK_TARGET (default 6), REFRESH_MINUTES (default 120),
 LEASE_MINUTES (default 120), RQ_SCRIPTS and NC_SCRIPTS (sibling skills' scripts),
 BANK_METADATA (lanes that get metadata.txt: cq, all, or off; default cq),
 DEVC_IMAGE, IMAGE_CHECK_MINUTES (default 60), DEVC_HUB_URL (Docker Hub tag API URL),
-SCREEN_HOURS (how long a screened PR waits for its author; default 48).
+SCREEN_HOURS (how long a screened PR waits for its author; default 48),
+REFRESH_MAX_HOURS (refresh the team queue at least this often, even when
+dormant; default 6), DORMANT_HOURS (no user activity for this long makes the
+bank dormant; default 4), REFRESH_RETRY_HOURS and REFRESH_RETRY_MAX_HOURS
+(backoff after failed refreshes: 2, 4, 8 hours by default),
+TICK_BACKOFF_BASE_MINUTES (the loop's cadence; default 20) and
+TICK_BACKOFF_MAX_MINUTES (cap on the no-change backoff; default 240, 0 turns
+it off).
 """
 import base64, fcntl, json, os, re, shutil, subprocess, sys, tempfile, time, urllib.request
 from datetime import datetime, timedelta, timezone
@@ -50,6 +57,13 @@ DEVC_IMAGE = os.environ.get("DEVC_IMAGE", "docker.io/nodejs/devcontainer:nightly
 IMAGE_CHECK_MIN = int(os.environ.get("IMAGE_CHECK_MINUTES", "60"))
 MOVE = "image-move"  # slot owner and PR while a slot moves to the new image
 SCREEN_HOURS = int(os.environ.get("SCREEN_HOURS", "48"))
+REFRESH_MAX_HOURS = float(os.environ.get("REFRESH_MAX_HOURS", "6"))
+DORMANT_HOURS = float(os.environ.get("DORMANT_HOURS", "4"))
+REFRESH_RETRY_HOURS = float(os.environ.get("REFRESH_RETRY_HOURS", "2"))
+REFRESH_RETRY_MAX_HOURS = float(os.environ.get("REFRESH_RETRY_MAX_HOURS", "8"))
+TICK_BASE_MIN = float(os.environ.get("TICK_BACKOFF_BASE_MINUTES", "20"))
+TICK_MAX_MIN = float(os.environ.get("TICK_BACKOFF_MAX_MINUTES", "240"))
+TICK_GRACE_MIN = 2  # a cron firing a little early still counts as due
 
 PRS, DOSSIER, CACHE, LOCKS, ARCHIVE = (BANK / d for d in ("prs", "dossier", "cache", "locks", "archive"))
 for d in (PRS, DOSSIER, CACHE, LOCKS, ARCHIVE):
@@ -150,7 +164,11 @@ def graphql(query):
     # treat a missing alias as not found.
     errs = [e for e in data.get("errors") or [] if e.get("type") != "NOT_FOUND"]
     if errs or not data.get("data"):
-        raise RuntimeError(f"graphql: {(errs or [{}])[0].get('message')}")
+        # A rate limit or server error has no "errors" list, only a
+        # top-level message (or nothing but stderr).
+        why = (errs[0].get("message") if errs else data.get("message")) or p.stderr.strip()[-200:] \
+            or f"exit {p.returncode}, no data"
+        raise RuntimeError(f"graphql: {why}")
     return data["data"]["repository"]
 
 
@@ -315,7 +333,9 @@ def refresh_queue():
     """Team-routed queue via build-queue.sh. On INCOMPLETE, keep the old rows
     and add the new ones, so a partial run never shrinks the queue. The rows
     are kept even when the metadata fetch fails, and the tick goes on. The
-    stamp is written only after both succeed, so the next tick retries."""
+    stamp is written only after both succeed. Every attempt is recorded in
+    queue-attempt.json, so a failure backs off instead of retrying (and
+    spending about 20 minutes of searches) on every tick."""
     p = subprocess.run(["zsh", str(RQ / "build-queue.sh")], env=ENV, text=True,
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     (CACHE / "queue.log").write_text(p.stderr)
@@ -328,13 +348,133 @@ def refresh_queue():
     else:
         status = f"{len(rows)} PRs"
     write_atomic(CACHE / "queue.tsv", "".join(f"{l}\n" for l in rows.values()))
+    ok = p.returncode == 0
     try:
         fetch_meta([int(n) for n in rows])
     except RuntimeError as err:
-        return f"{status}; candidate metadata FAILED ({str(err)[:120]}), kept the previous metadata"
-    if p.returncode == 0:
+        status = f"{status}; candidate metadata FAILED ({str(err)[:120]}), kept the previous metadata"
+        ok = False
+    if ok:
         (CACHE / "queue.stamp").write_text(iso(now()))
-    return status
+    prev = read_cache_json("queue-attempt.json")
+    attempt = {"at": iso(now()), "failures": 0 if ok else prev.get("failures", 0) + 1}
+    if not ok:
+        attempt["error"] = status
+    write_atomic(CACHE / "queue-attempt.json", json.dumps(attempt))
+    if ok:
+        return status
+    return (f"{status}; failed {attempt['failures']} time(s) in a row, "
+            f"next try after {iso(refresh_retry_at(attempt))}")
+
+
+def refresh_retry_at(attempt):
+    """When a failed refresh may be tried again: 2, 4, then 8 hours after
+    the last attempt, by default. None after a success."""
+    f = attempt.get("failures", 0)
+    if not f or not attempt.get("at"):
+        return None
+    hours = min(REFRESH_RETRY_HOURS * 2 ** (f - 1), REFRESH_RETRY_MAX_HOURS)
+    return parse_iso(attempt["at"]) + timedelta(hours=hours)
+
+
+def room_now(target=TARGET):
+    """How many new candidates plan could take, from the entries alone (the
+    same count plan uses, so it needs no candidate data)."""
+    es = entries()
+    active = [e for e in es if e["state"] in ACTIVE - {"stale"} and e["lane"] != "screen"]
+    stale = [e for e in es if e["state"] == "stale"]
+    return max(0, target - len(active) - len(stale))
+
+
+def last_activity():
+    """The latest sign the user is around: a sync, present, prefetch, put,
+    set, hold, or unhold they ran, or an action of theirs that a sync read
+    back from GitHub."""
+    times = [read_cache_json("activity.json").get("at")]
+    times += [e.get("disposition_at") for e in entries()
+              if e.get("disposition", "-").startswith(USER_DISPOSITIONS)]
+    times = [parse_iso(t) for t in times if t and t != "-"]
+    return max((t for t in times if t), default=None)
+
+
+def dormant(target=TARGET):
+    """Why fresh candidates aren't needed now, or None."""
+    if room_now(target) == 0:
+        return "bank full"
+    last = last_activity()
+    if not last:
+        return "no recorded activity"
+    if now() - last > timedelta(hours=DORMANT_HOURS):
+        return f"no activity since {iso(last)}"
+    return None
+
+
+def queue_due(force, target=TARGET):
+    """Whether this tick refreshes the team queue, and the line to print
+    when it doesn't. A failed refresh backs off first. A missing stamp
+    refreshes. A stale stamp refreshes unless the bank is dormant, and every
+    REFRESH_MAX_HOURS regardless."""
+    if force:
+        return True, None
+    attempt = read_cache_json("queue-attempt.json")
+    retry = refresh_retry_at(attempt)
+    if retry and now() < retry:
+        return False, (f"last refresh failed {attempt['failures']} time(s) in a row "
+                       f"({(attempt.get('error') or '?')[:160]}); next try after {iso(retry)} "
+                       f"(tick --refresh forces one)")
+    stamp = parse_iso((CACHE / "queue.stamp").read_text()) if (CACHE / "queue.stamp").exists() else None
+    if not stamp:
+        return True, None
+    age = now() - stamp
+    if age <= timedelta(minutes=REFRESH_MIN):
+        return False, f"cached from {iso(stamp)} (REFRESH_MINUTES={REFRESH_MIN})"
+    if age > timedelta(hours=REFRESH_MAX_HOURS):
+        return True, None
+    why = dormant(target)
+    if why:
+        by = stamp + timedelta(hours=REFRESH_MAX_HOURS)
+        return False, f"cached from {iso(stamp)}; dormant ({why}), refreshing by {iso(by)}"
+    return True, None
+
+
+def mark_active():
+    """The user ran a bank command: note it, and end any tick backoff."""
+    write_atomic(CACHE / "activity.json", json.dumps({"at": iso(now())}))
+    st = read_cache_json("tick.json")
+    if st.get("quiet") or st.get("next_due"):
+        write_atomic(CACHE / "tick.json", json.dumps({"quiet": 0, "next_due": None, "last": st.get("last")}))
+
+
+def tick_backed_off():
+    """The one line a backed-off tick prints, or None when a real tick is due.
+    Reads only the cache: no gh, no git."""
+    if TICK_MAX_MIN <= 0:
+        return None
+    st = read_cache_json("tick.json")
+    due = parse_iso(st["next_due"]) if st.get("next_due") else None
+    if not due or now() >= due:
+        return None
+    return (f"tick {iso(now())}: backed off after {st.get('quiet', 0)} quiet ticks in a row; "
+            f"next real tick at {iso(due)} (tick --now, sync, present, prefetch, or put runs sooner)")
+
+
+def record_tick(changed):
+    """Count quiet ticks and set when the next real one is due: on the base
+    cadence after the first quiet tick, then 2x, 4x, ... up to
+    TICK_BACKOFF_MAX_MINUTES. Any change resets it. Returns a report line."""
+    if changed or TICK_MAX_MIN <= 0:
+        st = {"quiet": 0, "next_due": None, "last": iso(now())}
+    else:
+        q = read_cache_json("tick.json").get("quiet", 0) + 1
+        minutes = min(TICK_BASE_MIN * 2 ** (q - 1), TICK_MAX_MIN)
+        due = now() + timedelta(minutes=minutes - TICK_GRACE_MIN) if minutes > TICK_BASE_MIN else None
+        st = {"quiet": q, "next_due": iso(due) if due else None, "last": iso(now())}
+    write_atomic(CACHE / "tick.json", json.dumps(st))
+    if not st["quiet"]:
+        return "tick: changes this tick; next tick on the normal cadence"
+    if not st["next_due"]:
+        return f"tick: quiet ({st['quiet']} in a row); next tick on the normal cadence"
+    return f"tick: quiet ({st['quiet']} in a row); backing off, next real tick at {st['next_due']}"
 
 
 def fetch_meta(nums):
@@ -1789,35 +1929,46 @@ def main(argv):
         print(__doc__)
         return
     cmd, args = argv[0], argv[1:]
+    if cmd == "tick" and not ({"--now", "--force", "--refresh"} & set(args)):
+        # Before me() and the lock: a backed-off tick makes no gh call.
+        line = tick_backed_off()
+        if line:
+            print(line)
+            return
     if cmd in ("tick", "sync", "plan", "prefetch"):
         me()
+    if cmd in ("sync", "present", "prefetch", "put", "set", "hold", "unhold"):
+        mark_active()
     if cmd == "tick":
+        target = int(args[args.index("--target") + 1]) if "--target" in args else TARGET
         lock = Flock("tick")
         if not lock.acquire(wait=False):
             die("another tick is running", 0)
+        changed = False
         try:
             print(f"tick {iso(now())}")
-            stamp = parse_iso((CACHE / "queue.stamp").read_text()) if (CACHE / "queue.stamp").exists() else None
-            if "--refresh" in args or not stamp or now() - stamp > timedelta(minutes=REFRESH_MIN):
-                print(f"  team queue: {refresh_queue()}")
-            else:
-                print(f"  team queue: cached from {iso(stamp)} (REFRESH_MINUTES={REFRESH_MIN})")
+            due, why = queue_due("--refresh" in args, target)
+            print(f"  team queue: {refresh_queue() if due else why}")
             print(f"  re-review lane: {refresh_rereview()}")
             for l in sync():
                 print(l if l.startswith("  ") else f"  {l}")
+                changed |= l not in ("sync: no changes", "sync: no open entries")
             print(f"  cq CI: {refresh_cq_ci()}")
             try:
                 for l in image_tick():
                     print(f"  image: {l}")
+                    # A pull or move started or running, or a slot released.
+                    changed |= any(w in l for w in ("pulling", "pull running", "moving", "released"))
             except (RuntimeError, OSError, ValueError) as err:
                 print(f"  image: check failed ({str(err)[:120]})")
         finally:
             lock.release()
-        target = int(args[args.index("--target") + 1]) if "--target" in args else TARGET
         lines, counts = plan(target)
+        changed |= any(l.startswith("PREPARE") for l in lines)
         list_cmd(False, target)
         print(f"plan: eligible candidates by lane: {counts}")
         print("\n".join(lines) or "plan: bank is full")
+        print(record_tick(changed))
     elif cmd == "sync":
         print("\n".join(sync(set(args) or None)))
     elif cmd == "plan":

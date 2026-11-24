@@ -77,7 +77,9 @@ class BankTest(unittest.TestCase):
                         FAKE_DEVC_DIR=str(self.fake), DEVC_HUB_URL=self.hub.as_uri(),
                         PATH=f"{fakebin}:{os.environ['PATH']}", ME="me", GH_MIN_GAP="0",
                         GH_RETRY_SLEEP="0", RQ_SCRIPTS=str(self.rq), NC_SCRIPTS=str(self.nc),
-                        NODE_CLONE=str(self.tmp / "clone"), REFRESH_MINUTES="100000")
+                        NODE_CLONE=str(self.tmp / "clone"), REFRESH_MINUTES="100000",
+                        # Off by default here: most tests run several ticks in a row.
+                        TICK_BACKOFF_MAX_MINUTES="0")
         for k in ("TERMINFO", "BANK_TARGET", "DEVC_IMAGE", "IMAGE_CHECK_MINUTES"):
             self.env.pop(k, None)
         self.rules([])
@@ -1161,6 +1163,176 @@ class BankTest(unittest.TestCase):
         self.assertIn("screen", e["wait_for"])
         self.assertIn("a comment by @bot-ish", self.run_bank("list").stdout)
 
+
+
+    # Backoff: dormant queue refreshes, failed refreshes, and quiet ticks.
+
+    def queue_rule(self, *nums, rc=0, stderr=""):
+        data = {f"p{n}": {"number": n, "title": f"PR {n}", "isDraft": False, "state": "OPEN",
+                          "updatedAt": ago(minutes=1), "headRefOid": A, "author": {"login": "someone"},
+                          "files": {"nodes": [{"path": "lib/net.js"}]}} for n in nums}
+        rule = {"match": ["graphql", "files(first:100)"], "rc": rc, "stderr": stderr,
+                "stdout": {"data": {"repository": data}} if rc == 0 else ""}
+        return rule
+
+    def fill_bank(self, n=6):
+        for i in range(n):
+            self.write_entry(100 + i, state="ready")
+
+    def test_a_full_bank_skips_a_stale_queue_refresh(self):
+        env = dict(self.env, REFRESH_MINUTES="120")
+        self.fill_bank()
+        self.cache("queue.stamp", ago(hours=3))
+        self.queue_out.write_text("5\thttp\t-\n")
+        self.rules([self.queue_rule(5), self.sync_rule(*[pr_node(100 + i, A) for i in range(6)])])
+        out = self.run_bank("tick", env=env).stdout
+        self.assertIn("dormant (bank full)", out)
+        self.assertNotIn("files(first:100)", json.dumps(self.calls()))
+        self.assertNotIn("5\thttp", (self.bank / "cache" / "queue.tsv").read_text()
+                         if (self.bank / "cache" / "queue.tsv").exists() else "")
+
+    def test_no_recent_activity_skips_a_stale_queue_refresh(self):
+        env = dict(self.env, REFRESH_MINUTES="120")
+        self.cache("queue.stamp", ago(hours=3))
+        self.cache("activity.json", json.dumps({"at": ago(hours=5)}))
+        self.queue_out.write_text("5\thttp\t-\n")
+        self.rules([self.queue_rule(5)])
+        out = self.run_bank("tick", env=env).stdout
+        self.assertIn("dormant (no activity since", out)
+        self.assertNotIn("files(first:100)", json.dumps(self.calls()))
+
+    def test_recent_activity_and_room_refresh_a_stale_queue(self):
+        env = dict(self.env, REFRESH_MINUTES="120")
+        self.cache("queue.stamp", ago(hours=3))
+        self.cache("activity.json", json.dumps({"at": ago(minutes=30)}))
+        self.queue_out.write_text("5\thttp\t-\n")
+        self.rules([self.queue_rule(5)])
+        out = self.run_bank("tick", env=env).stdout
+        self.assertIn("team queue: 1 PRs", out)
+
+    def test_a_dormant_bank_still_refreshes_every_six_hours(self):
+        env = dict(self.env, REFRESH_MINUTES="120")
+        self.fill_bank()
+        self.cache("queue.stamp", ago(hours=7))
+        self.queue_out.write_text("5\thttp\t-\n")
+        self.rules([self.queue_rule(5), self.sync_rule(*[pr_node(100 + i, A) for i in range(6)])])
+        out = self.run_bank("tick", env=env).stdout
+        self.assertIn("team queue: 1 PRs", out)
+        stamp = (self.bank / "cache" / "queue.stamp").read_text()
+        self.assertGreater(stamp, ago(minutes=5))
+
+    def test_a_failed_refresh_backs_off_two_four_then_eight_hours(self):
+        self.queue_out.write_text("5\thttp\t-\n")
+        self.rules([{"match": ["graphql", "files(first:100)"], "rc": 1, "stderr": "HTTP 502: Bad Gateway",
+                     "stdout": ""}])
+        out = self.run_bank("tick").stdout
+        self.assertRegex(out, r"team queue: .*metadata FAILED.*HTTP 502.*failed 1 time\(s\) in a row, next try after")
+        attempt = json.loads((self.bank / "cache" / "queue-attempt.json").read_text())
+        self.assertEqual(attempt["failures"], 1)
+        # The next tick doesn't retry, and says why.
+        calls = len(self.calls())
+        out = self.run_bank("tick").stdout
+        self.assertRegex(out, r"team queue: last refresh failed 1 time\(s\) in a row \(.*HTTP 502.*\); next try after")
+        self.assertEqual(sum("files(first:100)" in json.dumps(c) for c in self.calls()[calls:]), 0)
+        # Each failure doubles the wait, capped at 8 hours.
+        for failures, hours in ((1, 2), (2, 4), (3, 8), (5, 8)):
+            at = datetime.now(timezone.utc) - timedelta(hours=hours) + timedelta(minutes=5)
+            self.cache("queue-attempt.json", json.dumps({"at": iso(at), "failures": failures, "error": "x"}))
+            self.assertIn("last refresh failed", self.run_bank("tick").stdout, (failures, hours))
+            at -= timedelta(minutes=10)
+            self.cache("queue-attempt.json", json.dumps({"at": iso(at), "failures": failures, "error": "x"}))
+            self.assertNotIn("last refresh failed", self.run_bank("tick").stdout, (failures, hours))
+
+    def test_a_successful_refresh_clears_the_failure_count(self):
+        self.cache("queue-attempt.json", json.dumps({"at": ago(hours=9), "failures": 3, "error": "x"}))
+        self.queue_out.write_text("5\thttp\t-\n")
+        self.rules([self.queue_rule(5)])
+        self.run_bank("tick")
+        attempt = json.loads((self.bank / "cache" / "queue-attempt.json").read_text())
+        self.assertEqual(attempt["failures"], 0)
+
+    def test_refresh_forces_a_refresh_during_failure_backoff(self):
+        self.cache("queue-attempt.json", json.dumps({"at": ago(minutes=5), "failures": 1, "error": "x"}))
+        self.queue_out.write_text("5\thttp\t-\n")
+        self.rules([self.queue_rule(5)])
+        self.assertIn("team queue: 1 PRs", self.run_bank("tick", "--refresh").stdout)
+
+    def test_graphql_keeps_the_message_of_a_failure_without_an_errors_list(self):
+        self.queue_out.write_text("5\thttp\t-\n")
+        self.rules([{"match": ["graphql", "files(first:100)"], "rc": 1, "stdout": {
+            "message": "You have exceeded a secondary rate limit.", "documentation_url": "x"}}])
+        out = self.run_bank("tick", "--refresh").stdout
+        self.assertIn("secondary rate limit", out)
+
+    def backoff_env(self):
+        return dict(self.env, TICK_BACKOFF_MAX_MINUTES="240")
+
+    def quiet_tick(self, env, *args):
+        self.cache("queue.stamp", ago(minutes=1))
+        return self.run_bank("tick", *args, env=env).stdout
+
+    def tick_state(self):
+        return json.loads((self.bank / "cache" / "tick.json").read_text())
+
+    def test_quiet_ticks_back_off_doubling_up_to_four_hours(self):
+        env = self.backoff_env()
+        out = self.quiet_tick(env)
+        self.assertIn("tick: quiet (1 in a row); next tick on the normal cadence", out)
+        self.assertIsNone(self.tick_state()["next_due"])
+        expect = {2: 40, 3: 80, 4: 160, 5: 240, 6: 240}
+        for q in range(2, 7):
+            st = self.tick_state()
+            st["next_due"] = None  # pretend the wait passed
+            self.cache("tick.json", json.dumps(st))
+            out = self.quiet_tick(env)
+            self.assertIn(f"tick: quiet ({q} in a row); backing off, next real tick at", out)
+            due = datetime.fromisoformat(self.tick_state()["next_due"].replace("Z", "+00:00"))
+            minutes = (due - datetime.now(timezone.utc)).total_seconds() / 60
+            self.assertAlmostEqual(minutes, expect[q] - 2, delta=1.5, msg=q)
+
+    def test_a_backed_off_tick_makes_no_gh_call_and_says_when(self):
+        env = dict(self.backoff_env())
+        env.pop("ME")  # me() would call gh api user
+        self.cache("tick.json", json.dumps({"quiet": 3, "next_due": ago(minutes=-60)}))
+        out = self.run_bank("tick", env=env).stdout
+        self.assertRegex(out, r"^tick .*: backed off after 3 quiet ticks in a row; next real tick at ")
+        self.assertEqual(len(out.strip().splitlines()), 1)
+        self.assertEqual(self.calls(), [])
+
+    def test_tick_now_bypasses_the_backoff(self):
+        env = self.backoff_env()
+        self.cache("tick.json", json.dumps({"quiet": 3, "next_due": ago(minutes=-60)}))
+        out = self.quiet_tick(env, "--now")
+        self.assertIn("plan:", out)
+        self.assertEqual(self.tick_state()["quiet"], 4)
+
+    def test_a_change_resets_the_tick_backoff(self):
+        env = self.backoff_env()
+        self.cache("tick.json", json.dumps({"quiet": 4, "next_due": None}))
+        self.write_entry(5, state="ready")
+        self.rules([self.sync_rule(pr_node(5, A, state="CLOSED", closed_at=ago(minutes=1)))])
+        out = self.quiet_tick(env)
+        self.assertIn("tick: changes this tick", out)
+        self.assertEqual(self.tick_state(), {"quiet": 0, "next_due": None, "last": self.tick_state()["last"]})
+
+    def test_a_prepare_line_counts_as_a_change(self):
+        env = self.backoff_env()
+        self.cache("tick.json", json.dumps({"quiet": 2, "next_due": None}))
+        self.rereview_out.write_text(f"RE-REVIEW\t5\tAPPROVED\t{A}\t{A}\t{B}\t1\tMERGEABLE\t{ago(minutes=1)}\n")
+        out = self.quiet_tick(env)
+        self.assertIn("PREPARE 5", out)
+        self.assertEqual(self.tick_state()["quiet"], 0)
+
+    def test_user_commands_reset_the_tick_backoff_and_count_as_activity(self):
+        env = self.backoff_env()
+        for cmd in (("sync",), ("present",), ("put", "5", "x", "--head", A), ("prefetch", "5")):
+            with self.subTest(cmd=cmd[0]):
+                self.cache("tick.json", json.dumps({"quiet": 4, "next_due": ago(minutes=-60)}))
+                (self.bank / "cache" / "activity.json").unlink(missing_ok=True)
+                self.run_bank(*cmd, env=env, check=False)
+                self.assertEqual(self.tick_state()["quiet"], 0, cmd)
+                self.assertIsNone(self.tick_state()["next_due"], cmd)
+                self.assertIn("at", json.loads((self.bank / "cache" / "activity.json").read_text()))
 
 
 if __name__ == "__main__":

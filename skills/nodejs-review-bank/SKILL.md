@@ -109,6 +109,8 @@ Holds come from two places:
 
 A tick is idempotent. Run it on a loop (see [Per-tool settings](#per-tool-settings)); missing one costs nothing.
 
+**Backoff when quiet.** A tick where nothing changed (no woken hold, no landed, closed, or done entry, no recorded disposition, no stale entry, no `PREPARE` line, no image pull or move) counts as quiet. After the second quiet tick in a row, the next real tick waits twice the loop's cadence (`TICK_BACKOFF_BASE_MINUTES`, 20), then doubles again up to `TICK_BACKOFF_MAX_MINUTES` (240): 40, 80, 160, then 240 minutes. A tick fired before then prints one line saying when the next real tick is due, and makes no `gh` call. Any change resets the backoff, and so do `sync`, `present`, `prefetch`, `put`, `set`, `hold`, and `unhold`, since they mean the user is active. `tick --now` runs a real tick at once. Overnight and outside work hours the bank doesn't need to be current to the minute.
+
 ### 1. Refresh, sync, and plan
 
 ```bash
@@ -118,6 +120,8 @@ scripts/bank.py tick
 It takes a lock, so overlapping ticks exit early. Then it:
 
 - Reruns `nodejs-review-queue`'s `build-queue.sh` when the cached team queue is over `REFRESH_MINUTES` (120) old, or with `--refresh`. On 2026-11-17 that took 15 minutes (432 candidates, 99 relevant). On `INCOMPLETE`, it keeps the previous rows and adds the new ones. If the candidate metadata fetch fails, it keeps the new rows, reports it, and goes on with the tick.
+  - **Dormant:** it skips the refresh while the bank is full (no room for new candidates) or the user hasn't been active for `DORMANT_HOURS` (4), but refreshes at least every `REFRESH_MAX_HOURS` (6). Activity is any `sync`, `present`, `prefetch`, `put`, `set`, `hold`, or `unhold`, or an action of the user's that a sync read back. The `team queue:` line says when it skipped and why.
+  - **Failed refreshes back off:** an `INCOMPLETE` run or a failed metadata fetch is recorded in `cache/queue-attempt.json`, and the next try waits 2, then 4, then 8 hours (`REFRESH_RETRY_HOURS`, `REFRESH_RETRY_MAX_HOURS`). The `team queue:` line shows the failure count, the error, and the next try. `--refresh` forces one anyway.
 - Reruns `rereview.py --tsv` every tick (one search and a few GraphQL calls).
 - Syncs every open entry in one GraphQL batch: drops PRs that merged, closed, or became drafts, and PRs by the user. In nodejs, closed usually means landed (`nodejs-contribute`, *Landing*). Marks an entry `stale` when its head moved since preparation. Reads back the user's reviews, label changes, and comments since the entry was created, records them as the `disposition`, and marks the entry `done`, or `waiting` after an approval at a head that can't land yet. It checks each `waiting` entry's wake conditions (see [Holds](#holds)). A `cq` entry is also done once anyone adds the `commit-queue` label itself (not `commit-queue-squash`, `-rebase`, or `-failed`). Each entry is re-read under its lock before it's saved, so a `put`, `present`, or `set` made during the query isn't lost. An entry prefetched again during the query is left for the next sync.
 - Checks CI with `ci-status.sh` for up to 5 `cq` candidates (with no open entry, or held on `ci`) whose result is missing, for another head, or over 30 minutes old, oldest result first. A result counts for the head `ci-status.sh` reports.
@@ -312,7 +316,7 @@ On request, give the session roll-up from `bank.py list --all`, grouped by dispo
 ### Claude Code
 
 - **Loop:** start it with the `loop` skill, for example `/loop 20m run one nodejs-review-bank tick`, or with no interval to let the session pace itself.
-- **Tick:** run `~/.claude/skills/nodejs-review-bank/scripts/bank.py tick` with Bash in the background. A team queue refresh takes several minutes.
+- **Tick:** run `~/.claude/skills/nodejs-review-bank/scripts/bank.py tick` with Bash in the background. A team queue refresh takes several minutes. Keep the `team queue:` and `tick:` lines in any summary of the output: they carry refresh failures and the backoff state.
 - **Preparing agents:** spawn them with the Agent tool in the background, at most two holding slots and two read-only at a time. Release a slot when its agent reports, whatever the outcome.
 - **After a context reset or restart:** run `bank.py list` and `bank.py slot status`. Entries left `preparing` by a lost agent lapse to `stale` on their own. A slot held by a lost agent needs `bank.py slot release <slot> <pr>` once you've checked its checkout.
 - **Permissions:** see *Permissions for the Node.js skills* in this repo's `agents/claude/README.md`.

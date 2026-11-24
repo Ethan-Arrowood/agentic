@@ -14,8 +14,10 @@ rate limit. Read-only on GitHub: nothing here posts, labels, or reviews.
   bank.py prefetch <pr>                   fetch the PR's dossier and claim the entry (or screen it)
   bank.py put <pr> <summary.md> [--head <sha>]   bank a verified summary (ready or needs-run)
   bank.py set <pr> key=value...           edit entry fields (state=done disposition=skipped)
-  bank.py hold <pr> [--until ISO] [--until-reviews N] [note]   wait for others' reviews, a push, or a time
+  bank.py hold <pr> [--until ISO] [--until-reviews N] [--until-author] [note]
+                                          wait for others' reviews, a push, a time, or an author comment
   bank.py hold <pr> --screen [--until ISO] [note]   wait for the author after an automation screen (48 h)
+  bank.py defer <pr> <reason...>          not worth reviewing yet: wait for the author, a push, a review, or DEFER_DAYS
   bank.py unhold <pr>                     end a hold now
   bank.py slot status|acquire <slot|any> <pr> [owner]|release <slot> <pr>|release <slot> --force
   bank.py image prune                     remove free slots' out/ volumes for unused images
@@ -26,6 +28,7 @@ LEASE_MINUTES (default 120), RQ_SCRIPTS and NC_SCRIPTS (sibling skills' scripts)
 BANK_METADATA (lanes that get metadata.txt: cq, all, or off; default cq),
 DEVC_IMAGE, IMAGE_CHECK_MINUTES (default 60), DEVC_HUB_URL (Docker Hub tag API URL),
 SCREEN_HOURS (how long a screened PR waits for its author; default 48),
+DEFER_DAYS (how long a deferred PR waits at most; default 7),
 REFRESH_MAX_HOURS (refresh the team queue at least this often, even when
 dormant; default 6), DORMANT_HOURS (no user activity for this long makes the
 bank dormant; default 4), REFRESH_RETRY_HOURS and REFRESH_RETRY_MAX_HOURS
@@ -57,6 +60,7 @@ DEVC_IMAGE = os.environ.get("DEVC_IMAGE", "docker.io/nodejs/devcontainer:nightly
 IMAGE_CHECK_MIN = int(os.environ.get("IMAGE_CHECK_MINUTES", "60"))
 MOVE = "image-move"  # slot owner and PR while a slot moves to the new image
 SCREEN_HOURS = int(os.environ.get("SCREEN_HOURS", "48"))
+DEFER_DAYS = float(os.environ.get("DEFER_DAYS", "7"))
 REFRESH_MAX_HOURS = float(os.environ.get("REFRESH_MAX_HOURS", "6"))
 DORMANT_HOURS = float(os.environ.get("DORMANT_HOURS", "4"))
 REFRESH_RETRY_HOURS = float(os.environ.get("REFRESH_RETRY_HOURS", "2"))
@@ -653,6 +657,7 @@ def plan(target=TARGET, show_all=False):
     if show_all:
         lines += [f"SKIP {c['pr']} lane={c['lane']} {why}" for c, why in skipped]
         lines += [f"WAIT {e['pr']} lane={e['lane']} {describe_wait(e)}"
+                  + (f"  ({e['note']})" if e.get("note") not in (None, "-") else "")
                   for e in sorted(bank.values(), key=rank) if e["state"] == "waiting"]
         lines += [f"SCREEN {e['pr']} {e['state']} {e.get('screen') or '-'}  {e['title'][:60]}"
                   for e in sorted(bank.values(), key=rank)
@@ -875,7 +880,9 @@ def wake_reasons(e, d):
     if w.get("author") and any((c.get("author") or {}).get("login") == w["author"]
                                and (parse_iso(c.get("createdAt")) or since) > since
                                for c in (d.get("comments") or {}).get("nodes", [])):
-        why.append(f"author responded: comment by @{w['author']}")
+        # "author responded" marks a screen hold's wake: prefetch then skips the screen.
+        why.append(f"author responded: comment by @{w['author']}" if "screen" in w
+                   else f"comment by the author @{w['author']}")
     if "reviews" in w:
         # Distinct reviewers other than me and the author, any review state.
         who = {(r.get("author") or {}).get("login") for r in (d.get("allReviews") or {}).get("nodes", [])
@@ -1789,7 +1796,8 @@ def put(n, summary, head=None):
     entry, take over a newer preparation, or demote a presented one."""
     body = Path(summary).read_text()
     m = re.search(r"^#+ *Needs a run\s*\n(.*?)(?=^#|\Z)", body, re.S | re.M)
-    pending = len(re.findall(r"^\s*- ", m.group(1), re.M)) if m else 0
+    # A "- None" item is no run: a run that can't be done goes under Open questions.
+    pending = len(re.findall(r"^\s*- (?!none\b)", m.group(1), re.M | re.I)) if m else 0
     with entry_lock(n):
         e = load(n) or die(f"no entry for {n}; prefetch it first")
         if e["state"] not in ("preparing", "needs-run"):
@@ -1866,15 +1874,41 @@ def set_cmd(n, kvs):
     show(e, header_only=True)
 
 
+def held_entry(n):
+    """The entry for a hold, or a new one from the candidate when the bank
+    has none yet. Not saved."""
+    e = load(n)
+    if e:
+        return e
+    c = {c["pr"]: c for c in ranked_candidates()}.get(n) or \
+        die(f"#{n} is neither in the bank nor a candidate; nothing to hold")
+    return {"pr": n, "url": f"https://github.com/{REPO}/pull/{n}", "title": c.get("title") or "-",
+            "author": c.get("author") or "-", "lane": c["lane"], "head": c["head"], "pr_head": c["head"],
+            "created_at": iso(now()), "updated_at": c["updated"], "my_teams": c.get("my_teams"),
+            "rereview_from": c.get("rereview_from"), "disposition": "-"}
+
+
+def author_of(e):
+    """The PR author's login from the entry, else the candidate metadata, or None."""
+    if e.get("author") not in (None, "-", "", "ghost"):
+        return e["author"]
+    meta = read_cache_json("candidates.json").get(str(e["pr"])) or {}
+    return meta.get("author") if meta.get("author") not in (None, "ghost") else None
+
+
 def hold_cmd(n, args):
-    """Hold a PR until others review it, it gets a push, or --until passes.
-    Works for a candidate with no entry yet. No GitHub call: the push
-    condition uses the latest head the bank has seen."""
-    n, until, reviews, note, scr = str(int(n)), None, "1", [], False
+    """Hold a PR until others review it, it gets a push, --until passes, or
+    (with --until-author) its author comments. Works for a candidate with no
+    entry yet. No GitHub call: the push condition uses the latest head the
+    bank has seen."""
+    n, until, reviews, note, scr, by_author = str(int(n)), None, "1", [], False, False
     while args:
         a = args.pop(0)
         if a == "--screen":
             scr = True
+            continue
+        if a == "--until-author":
+            by_author = True
             continue
         if a in ("--until", "--until-reviews") and not args:
             die(f"{a} needs a value", 2)
@@ -1890,14 +1924,7 @@ def hold_cmd(n, args):
         else:
             note.append(a)
     with entry_lock(n):
-        e = load(n)
-        if not e:
-            c = {c["pr"]: c for c in ranked_candidates()}.get(n) or \
-                die(f"#{n} is neither in the bank nor a candidate; nothing to hold")
-            e = {"pr": n, "url": f"https://github.com/{REPO}/pull/{n}", "title": c.get("title") or "-",
-                 "author": c.get("author") or "-", "lane": c["lane"], "head": c["head"], "pr_head": c["head"],
-                 "created_at": iso(now()), "updated_at": c["updated"], "my_teams": c.get("my_teams"),
-                 "rereview_from": c.get("rereview_from"), "disposition": "-"}
+        e = held_entry(n)
         head = e["pr_head"] if e.get("pr_head") not in (None, "-") else e["head"]
         if scr:
             # After a comment asking the author to follow the AI policy.
@@ -1909,10 +1936,31 @@ def hold_cmd(n, args):
             return
         w = {"reviews": reviews} if int(reviews) else {}
         w["push"] = head[:12]
+        if by_author:
+            w["author"] = author_of(e) or die(f"#{n}: the author is unknown; prefetch it first", 2)
         if until:
             w["until"] = until
         hold(e, w, iso(now()), "held" + (f": {' '.join(note)}" if note else ""))
     show(e, header_only=True)
+
+
+def defer_cmd(n, args):
+    """Hold a PR that isn't worth reviewing yet: someone else's request to the
+    author is open, a linked PR may supersede it, or the author said more is
+    coming. It wakes when the author comments, the head moves, someone else
+    reviews, or DEFER_DAYS pass. Prints one DEFER line for the orchestrator to
+    relay."""
+    n, reason = str(int(n)), " ".join(" ".join(args).split())
+    if not reason:
+        die("usage: defer <pr> <reason...> (quote or link the comment it waits on)", 2)
+    with entry_lock(n):
+        e = held_entry(n)
+        head = e["pr_head"] if e.get("pr_head") not in (None, "-") else e["head"]
+        w = {"reviews": "1", "push": head[:12]}
+        w["author"] = author_of(e) or die(f"#{n}: the author is unknown; prefetch it first", 2)
+        w["until"] = iso(now() + timedelta(days=DEFER_DAYS))
+        hold(e, w, iso(now()), f"defer: {reason}")
+    print(f"DEFER #{n}: {reason}")
 
 
 def unhold_cmd(n):
@@ -1991,6 +2039,10 @@ def main(argv):
         set_cmd(args[0], args[1:])
     elif cmd == "hold":
         hold_cmd(args[0], args[1:])
+    elif cmd == "defer":
+        if not args:
+            die("usage: defer <pr> <reason...>", 2)
+        defer_cmd(args[0], args[1:])
     elif cmd == "unhold":
         unhold_cmd(args[0])
     elif cmd == "slot":

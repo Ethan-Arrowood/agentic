@@ -937,6 +937,108 @@ class BankTest(unittest.TestCase):
         self.assertEqual(self.entry(5)["note"], "woke: unheld by hand")
         self.assertNotEqual(self.run_bank("unhold", "5", check=False).returncode, 0)
 
+    def test_hold_until_author_wakes_on_an_author_comment(self):
+        self.write_entry(5, state="ready", author="writer")
+        self.run_bank("hold", "5", "--until-author", "--until-reviews", "0")
+        e = self.entry(5)
+        self.assertEqual(e["wait_for"], f"push={A[:12]},author=writer")
+        self.assertIn("a comment by @writer", self.run_bank("list").stdout)
+        other = {"author": {"login": "bystander"}, "createdAt": ago(minutes=-1), "body": "+1"}
+        old = {"author": {"login": "writer"}, "createdAt": ago(hours=1), "body": "earlier"}
+        self.rules([self.sync_rule(pr_node(5, A, author="writer", comments=[old, other]))])
+        self.run_bank("sync")
+        self.assertEqual(self.entry(5)["state"], "waiting", "only a new comment by the author wakes it")
+        theirs = {"author": {"login": "writer"}, "createdAt": ago(minutes=-1), "body": "benchmarks below"}
+        self.rules([self.sync_rule(pr_node(5, A, author="writer", comments=[old, other, theirs]))])
+        self.run_bank("sync")
+        e = self.entry(5)
+        self.assertEqual(e["state"], "done")
+        # Not "author responded": that marks a screen hold, whose wake skips the screen at prefetch.
+        self.assertEqual(e["note"], "woke: comment by the author @writer")
+
+    def test_hold_until_author_refuses_an_unknown_author(self):
+        self.cache("rereview.tsv", self.rereview_row(5, bucket="RE-REVIEW"))
+        p = self.run_bank("hold", "5", "--until-author", check=False)
+        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+        self.assertFalse((self.bank / "prs" / "5.md").exists())
+
+    def defer_until(self, e):
+        w = dict(t.partition("=")[::2] for t in e["wait_for"].split(","))
+        until = datetime.strptime(w["until"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        since = datetime.strptime(e["wait_since"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        return w, until - since
+
+    def test_defer_holds_on_the_author_a_push_a_review_or_seven_days(self):
+        self.write_entry(5, state="preparing", author="writer", lease=ago(minutes=5))
+        d = self.bank / "dossier" / "5"
+        d.mkdir(parents=True)
+        reason = "mcollina asked for a benchmark (https://github.com/nodejs/node/pull/5#issuecomment-1), no reply"
+        out = self.run_bank("defer", "5", *reason.split()).stdout
+        self.assertEqual(out.strip().splitlines()[-1], f"DEFER #5: {reason}")
+        e = self.entry(5)
+        self.assertEqual(e["state"], "waiting")
+        self.assertEqual(e["note"], f"defer: {reason}")
+        w, span = self.defer_until(e)
+        self.assertEqual((w["reviews"], w["push"], w["author"]), ("1", A[:12], "writer"))
+        self.assertEqual(span, timedelta(days=7))
+        self.assertFalse(d.exists())
+        self.assertIn(f"(defer: {reason})", self.run_bank("plan", "--all").stdout)
+        # A review by someone else wakes it.
+        self.rules([self.sync_rule(self.reviewed_node(5, A, others=[("lpinca", -1)]))])
+        self.run_bank("sync")
+        self.assertEqual(self.entry(5)["note"], "woke: reviewed by lpinca")
+        # A push wakes it.
+        self.run_bank("defer", "5", "author", "said", "more", "commits", "are", "coming")
+        self.rules([self.sync_rule(self.reviewed_node(5, B))])
+        self.run_bank("sync")
+        self.assertEqual(self.entry(5)["note"], f"woke: new push {B[:12]}")
+        # unhold reverses it.
+        self.write_entry(5, state="ready", author="writer")
+        self.run_bank("defer", "5", "waiting", "on", "a", "rebase")
+        self.run_bank("unhold", "5")
+        self.assertEqual(self.entry(5)["note"], "woke: unheld by hand")
+
+    def test_defer_falls_back_to_DEFER_DAYS(self):
+        self.write_entry(5, state="ready", author="writer")
+        self.run_bank("defer", "5", "linked", "PR", "may", "supersede", "it", env=dict(self.env, DEFER_DAYS="2"))
+        e = self.entry(5)
+        w, span = self.defer_until(e)
+        self.assertEqual(span, timedelta(days=2))
+        self.rules([self.sync_rule(self.reviewed_node(5, A))])
+        self.run_bank("sync")
+        self.assertEqual(self.entry(5)["state"], "waiting", "no author comment, push, or review yet")
+        # Pretend the 2 days passed with nothing else: the time wakes it.
+        e["wait_for"] = e["wait_for"].replace(w["until"], ago(minutes=1))
+        self.write_entry(5, **{k: v for k, v in e.items() if k not in ("body", "pr")})
+        self.run_bank("sync")
+        e = self.entry(5)
+        self.assertEqual(e["state"], "done")
+        self.assertRegex(e["note"], r"^woke: hold until \S+Z passed$")
+
+    def test_defer_needs_a_reason(self):
+        self.write_entry(5, state="ready", author="writer")
+        p = self.run_bank("defer", "5", check=False)
+        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+        self.assertEqual(self.entry(5)["state"], "ready")
+
+    def test_deferred_entries_do_not_use_the_banks_room(self):
+        self.candidate_cache(9)
+        self.write_entry(5, state="needs-run", author="writer", needs_run="1")
+        out = self.run_bank("plan", "--target", "1").stdout
+        self.assertNotIn("PREPARE 9", out)
+        self.run_bank("defer", "5", "the", "author", "must", "rebase", "before", "the", "repro", "can", "run")
+        self.assertEqual(self.entry(5)["state"], "waiting")
+        self.assertIn("PREPARE 9", self.run_bank("plan", "--target", "1").stdout)
+
+    def test_a_run_that_cannot_be_done_is_an_open_question_not_needs_run(self):
+        self.write_entry(5, state="preparing", head=A, pr_head=A, lease=ago(minutes=1))
+        summary = self.tmp / "s.md"
+        summary.write_text("## Summary\n### Needs a run\n- None.\n"
+                           "### Open questions\n- Is it faster on arm64? Needs hardware the slots lack.\n")
+        self.run_bank("put", "5", str(summary), "--head", A)
+        e = self.entry(5)
+        self.assertEqual((e["state"], e["needs_run"]), ("ready", "0"))
+
     def test_an_approval_before_the_landing_wait_ends_waits(self):
         self.write_entry(5, state="presented", lane="rereview", created_at=ago(hours=2))
         node = self.reviewed_node(5, A, created=ago(hours=1))

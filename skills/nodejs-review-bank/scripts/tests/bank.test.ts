@@ -1,14 +1,14 @@
-// Offline tests for bank.py. Run from scripts/: node --test tests/
+// Offline tests for bank.ts. Run from scripts/: node --test tests/
 //
-// A one-to-one port of test_bank.py. Each test gets a temporary bank, a fake
+// Each test gets a temporary bank, a fake
 // gh on PATH (fake_gh.py), stub sibling scripts (devc.sh is fake_devc.py), a
 // Docker Hub response read from a file, and, where needed, a temporary git
 // clone with an upstream. Nothing here touches the network, a container
 // engine, or the real bank.
 //
 // The tests are black-box: they run the CLI and check its output, exit status,
-// and files. BANK_CMD swaps in another implementation, such as the TypeScript
-// port: BANK_CMD="node bank.ts". Paths resolve from scripts/.
+// and files. BANK_CMD swaps in another implementation, such as
+// BANK_CMD="node bank.ts". Paths resolve from scripts/.
 import { describe, test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
@@ -24,7 +24,7 @@ type Proc = { returncode: number; stdout: string; stderr: string };
 
 const HERE = import.meta.dirname;
 const SCRIPTS = path.dirname(HERE);
-const BANK_CMD = (process.env.BANK_CMD ? process.env.BANK_CMD.split(/\s+/).filter(Boolean) : ["python3", "bank.py"])
+const BANK_CMD = (process.env.BANK_CMD ? process.env.BANK_CMD.split(/\s+/).filter(Boolean) : [process.execPath, "bank.ts"])
   .map((a) => (isFile(path.resolve(SCRIPTS, a)) ? path.resolve(SCRIPTS, a) : a));
 const RQ_REAL = realpath(path.resolve(SCRIPTS, "../../nodejs-review-queue/scripts"));
 const NC_REAL = realpath(path.resolve(SCRIPTS, "../../nodejs-contribute/scripts"));
@@ -186,7 +186,7 @@ class Popen {
 }
 
 // Holds an exclusive flock on `file` in a zsh child until release() closes its
-// stdin. On macOS this blocks bank.py's fcntl.flock as Python's own lock would.
+// stdin. On macOS this also blocks a flock on the same file.
 async function holdFlock(file: string): Promise<{ release: () => Promise<void> }> {
   fs.closeSync(fs.openSync(file, "a"));
   const child = spawn("zsh", ["-c", 'zmodload zsh/system; zsystem flock -f fd "$1" && print locked && read', "zsh", file],
@@ -325,7 +325,7 @@ class BankTest {
   runBank(args: string[], { check = true, timeout = 60, env }: { check?: boolean; timeout?: number; env?: Env } = {}): Proc {
     const p = runSync(BANK_CMD[0], [...BANK_CMD.slice(1), ...args], { env: env ?? this.env, timeout });
     if (check && p.returncode !== 0) {
-      assert.fail(`bank.py ${args.join(" ")} exited ${p.returncode}\n${p.stdout}\n${p.stderr}`);
+      assert.fail(`bank.ts ${args.join(" ")} exited ${p.returncode}\n${p.stdout}\n${p.stderr}`);
     }
     return p;
   }
@@ -1483,6 +1483,20 @@ describe("bank", { concurrency: 1 }, () => {
     assert.equal(b.entry(5).state, "waiting");
     b.runBank(["sync"]);
     assert.equal(b.entry(5).note, `woke: CI green at ${A.slice(0, 12)}`);
+  });
+
+  test("a re-review comes before a commit-queue check", () => {
+    // The cq candidate was updated more recently, so only the lane order puts
+    // the re-review first.
+    const green = JSON.stringify({ 5: { head: A.slice(0, 12), ok: true, line: "CI=SUCCESS HEAD-MATCH", at: ago({ minutes: 1 }) } });
+    b.cache("ci.json", green);
+    b.cache("rereview.tsv",
+      b.rereviewRow(6, { bucket: "RE-REVIEW", updated: ago({ hours: 2 }) }).replace(/\n+$/, "") + `\t${ago({ hours: 100 })}\thttp\n`
+      + b.rereviewRow(5, { updated: ago({ minutes: 1 }) }).replace(/\n+$/, "") + `\t${ago({ hours: 100 })}\thttp\n`);
+    const out = b.runBank(["plan"]).stdout;
+    assertIn("PREPARE 6 lane=rereview", out);
+    assertIn("PREPARE 5 lane=cq", out);
+    assert.ok(out.indexOf("PREPARE 6") < out.indexOf("PREPARE 5"), out);
   });
 
   test("a cq candidate waits for the landing wait", () => {

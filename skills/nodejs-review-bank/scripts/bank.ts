@@ -1,30 +1,29 @@
 #!/usr/bin/env node
-// A port of bank.py to TypeScript, function for function. Node runs it as is
-// (type stripping): no dependencies, no build. Functions keep bank.py's names
-// in camelCase and its order, so the two files diff side by side. The helpers
-// under "Python compatibility" reproduce the Python behavior the port relies on.
+// The bank. Node runs it as is (type stripping): no dependencies, no build.
+// It started as a function-for-function port of bank.py, so the helpers under
+// "Python compatibility" still reproduce the Python behavior it relies on.
 const DOC = `nodejs-review-bank: a bank of prepared nodejs/node reviews on disk.
 
 Deterministic parts of the skill. Every gh call goes through the bin/gh shim
 (one gh call at a time across processes) and backs off on GitHub's secondary
 rate limit. Read-only on GitHub: nothing here posts, labels, or reviews.
 
-  bank.py tick [--refresh] [--now] [--target N]   refresh candidates, sync, prune, plan
-  bank.py sync [PR...]                    re-read bank entries from GitHub, prune
-  bank.py plan [--target N] [--all]       what to prepare next, in priority order (--all adds skips)
-  bank.py list [--all]                    the bank, by priority
-  bank.py show <pr>                       one entry
-  bank.py present                         mark the top ready entry presented, show it
-  bank.py prefetch <pr>                   fetch the PR's dossier and claim the entry (or screen it)
-  bank.py put <pr> <summary.md> [--head <sha>]   bank a verified summary (ready or needs-run)
-  bank.py set <pr> key=value...           edit entry fields (state=done disposition=skipped)
-  bank.py hold <pr> [--until ISO] [--until-reviews N] [--until-author] [note]
+  bank.ts tick [--refresh] [--now] [--target N]   refresh candidates, sync, prune, plan
+  bank.ts sync [PR...]                    re-read bank entries from GitHub, prune
+  bank.ts plan [--target N] [--all]       what to prepare next, in priority order (--all adds skips)
+  bank.ts list [--all]                    the bank, by priority
+  bank.ts show <pr>                       one entry
+  bank.ts present                         mark the top ready entry presented, show it
+  bank.ts prefetch <pr>                   fetch the PR's dossier and claim the entry (or screen it)
+  bank.ts put <pr> <summary.md> [--head <sha>]   bank a verified summary (ready or needs-run)
+  bank.ts set <pr> key=value...           edit entry fields (state=done disposition=skipped)
+  bank.ts hold <pr> [--until ISO] [--until-reviews N] [--until-author] [note]
                                           wait for others' reviews, a push, a time, or an author comment
-  bank.py hold <pr> --screen [--until ISO] [note]   wait for the author after an automation screen (48 h)
-  bank.py defer <pr> <reason...>          not worth reviewing yet: wait for the author, a push, a review, or DEFER_DAYS
-  bank.py unhold <pr>                     end a hold now
-  bank.py slot status|acquire <slot|any> <pr> [owner]|release <slot> <pr>|release <slot> --force
-  bank.py image prune                     remove free slots' out/ volumes for unused images
+  bank.ts hold <pr> --screen [--until ISO] [note]   wait for the author after an automation screen (48 h)
+  bank.ts defer <pr> <reason...>          not worth reviewing yet: wait for the author, a push, a review, or DEFER_DAYS
+  bank.ts unhold <pr>                     end a hold now
+  bank.ts slot status|acquire <slot|any> <pr> [owner]|release <slot> <pr>|release <slot> --force
+  bank.ts image prune                     remove free slots' out/ volumes for unused images
 
 Env: NODE_REVIEW_BANK (bank dir), NODE_CLONE (default ~/dev/nodejs/node),
 REPO, ME, BANK_TARGET (default 6), REFRESH_MINUTES (default 120),
@@ -260,7 +259,7 @@ const EOL = "(?=\\n|(?![\\s\\S]))";
 const DOT = "[^\\n]";
 
 // json.dumps: ", " and ": " separators (or one item per line with indent),
-// and ensure_ascii, so files match what bank.py writes.
+// and ensure_ascii, so files written by the earlier bank.py read the same.
 function jsonStr(s: string): string {
   return JSON.stringify(s).replace(/[\u007f-\uffff]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
 }
@@ -491,7 +490,7 @@ function run(cmd: string[], o: RunOpts = {}): Proc {
 }
 
 // ---------------------------------------------------------------------------
-// bank.py
+// The bank
 // ---------------------------------------------------------------------------
 
 const THIS = fs.realpathSync(fileURLToPath(import.meta.url));
@@ -665,7 +664,7 @@ function git(args: string[], { check = true } = {}): string {
 // Locks. Python holds an fcntl lock on an open file. Node has no file lock,
 // so each held lock is a small zsh process that holds a zsystem flock (an
 // fcntl lock, the same kind the bin/gh shim takes; on macOS it also excludes
-// bank.py's flock). The helper's stdin and stdout are FIFOs:
+// flock users). The helper's stdin and stdout are FIFOs:
 //   - acquire blocks in a plain readSync on the helper's stdout until it
 //     prints "locked" (got it) or exits without it (busy with -t 0, or failed).
 //     A FIFO read end opened without O_NONBLOCK blocks, unlike Node's pipes.

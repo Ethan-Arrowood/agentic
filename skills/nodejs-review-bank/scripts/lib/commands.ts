@@ -207,17 +207,18 @@ export function holdCmd(prArg: string, args: string[]): void {
   {
     using lock = entryLock(pr).enter();
     e = heldEntry(pr);
+    const since = iso(now());
     let w: WaitFor;
     if (screen) {
       // After a comment asking the author to follow the AI policy.
-      w = screenConditions(e, e.author, latestHead(e), iso(now()));
+      w = screenConditions(e, e.author, latestHead(e), since);
     } else {
       w = Number(reviews) ? { reviews } : {};
       w.push = latestHead(e).slice(0, 12);
       if (byAuthor) w.author = authorOf(e) || die(`#${pr}: the author is unknown; prefetch it first`, 2);
     }
     if (until) w.until = until;
-    hold(e, w, iso(now()), (screen ? "screen: waiting for the author" : "held") + noted);
+    hold(e, w, since, (screen ? "screen: waiting for the author" : "held") + noted);
   }
   show(e, true);
 }
@@ -235,8 +236,9 @@ export function deferCmd(prArg: string, args: string[]): void {
     const e = heldEntry(pr);
     const w: WaitFor = { reviews: "1", push: latestHead(e).slice(0, 12) };
     w.author = authorOf(e) || die(`#${pr}: the author is unknown; prefetch it first`, 2);
-    w.until = iso(now() + DEFER_DAYS * DAY);
-    hold(e, w, iso(now()), `defer: ${reason}`);
+    const since = now();
+    w.until = iso(since + DEFER_DAYS * DAY);
+    hold(e, w, iso(since), `defer: ${reason}`);
   }
   print(`DEFER #${pr}: ${reason}`);
 }

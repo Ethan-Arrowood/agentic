@@ -1293,6 +1293,27 @@ describe("bank", { concurrency: 1 }, () => {
     assert.ok(!exists(path.join(b.bank, "prs", "5.md")));
   });
 
+  test("hold until stores a time with an offset as UTC", () => {
+    b.writeEntry(5);
+    for (const bad of ["tomorrow", "-", "2099-02-30T00:00:00Z"]) {
+      assert.equal(b.runBank(["hold", "5", "--until", bad], { check: false }).returncode, 2, bad);
+    }
+    assert.equal(b.entry(5).state, "ready");
+    b.runBank(["hold", "5", "--until", "2099-12-01T09:30:00-08:00"]);
+    assertIn("until=2099-12-01T17:30:00Z", b.entry(5).wait_for);
+  });
+
+  test("a missing or bad argument exits 1 with a message", () => {
+    for (const args of [["show"], ["put", "5"], ["slot", "acquire", "any"]]) {
+      const p = b.runBank(args, { check: false });
+      assert.equal(p.returncode, 1, args.join(" "));
+      assert.match(p.stderr, /^bank: usage: /, args.join(" "));
+    }
+    const p = b.runBank(["hold", "five"], { check: false });
+    assert.equal(p.returncode, 1);
+    assert.equal(p.stderr, "bank: not a PR number: five\n");
+  });
+
   test("reviews by others wake a hold and the pr is planned again", () => {
     // Skipped in the cq lane at this head, then held: the wake brings it back.
     b.writeEntry(5, { state: "done", lane: "cq", acted_head: A, disposition: "skipped",

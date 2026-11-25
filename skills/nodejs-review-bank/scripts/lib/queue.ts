@@ -1,8 +1,9 @@
-import { CACHE, CQ_CI_MAX_AGE, CQ_CI_PER_TICK, DORMANT_HOURS, ENV, NAME, NC, OWNER, REFRESH_MAX_HOURS, REFRESH_MIN, REFRESH_RETRY_HOURS, REFRESH_RETRY_MAX_HOURS, RQ, TARGET } from "./config.ts";
+import { BANK_TARGET, CACHE, CQ_CI_MAX_AGE_MINUTES, CQ_CI_PER_TICK, DORMANT_HOURS, ENV, NAME, NC, OWNER, REFRESH_MAX_HOURS, REFRESH_MINUTES, REFRESH_RETRY_HOURS, REFRESH_RETRY_MAX_HOURS, RQ } from "./config.ts";
+import { B, type Dt, EPOCH, P, RuntimeError, add, cut, dateOf, dict, dumps, exists, hours, iso, minutes, now, parseIso, pget, py, pyInt, sorted, splitlines, startsWithAny, strip, truthy, unpack, unset, weekday } from "./py.ts";
+import { readCacheJson, readText, readTsv, run, sleep, writeAtomic, writeText } from "./util.ts";
+
 import { ACTIVE, type Candidate, type Entry, LANES, LANE_OF_BUCKET, SKIP_PATHS, USER_DISPOSITIONS, actedHead, describeWait, entries, rank, wakeConditions } from "./entry.ts";
 import { graphql, me } from "./github.ts";
-import { B, type Dt, EPOCH, P, RuntimeError, add, cut, dateOf, dict, dumps, hours, minutes, pget, py, pyInt, sorted, splitlines, startsWithAny, strip, truthy, unpack, unset, weekday } from "./py.ts";
-import { exists, iso, now, parseIso, readCacheJson, readText, readTsv, run, sleep, writeAtomic, writeText } from "./util.ts";
 
 // Team-routed queue via build-queue.sh. On INCOMPLETE, keep the old rows
 // and add the new ones, so a partial run never shrinks the queue. The rows
@@ -16,7 +17,7 @@ export function refreshQueue(): string {
   let rows = new Map<string, string>();
   for (const l of splitlines(p.stdout)) if (strip(l)) rows.set(l.split("\t")[0], l);
   let status: string;
-  if (p.returncode !== 0) {
+  if (p.status !== 0) {
     const old = new Map(readTsv("queue.tsv").map((r) => [r[0], r.join("\t")] as const));
     for (const [k, v] of rows) old.set(k, v);
     rows = old;
@@ -25,7 +26,7 @@ export function refreshQueue(): string {
     status = `${rows.size} PRs`;
   }
   writeAtomic(P(CACHE, "queue.tsv"), [...rows.values()].map((l) => `${l}\n`).join(""));
-  let ok = p.returncode === 0;
+  let ok = p.status === 0;
   try {
     fetchMeta([...rows.keys()].map((n) => pyInt(n)));
   } catch (err) {
@@ -34,7 +35,7 @@ export function refreshQueue(): string {
     ok = false;
   }
   if (ok) writeText(P(CACHE, "queue.stamp"), iso(now()));
-  const prev = readCacheJson("queue-attempt.json");
+  const prev = readCacheJson<any>("queue-attempt.json");
   const attempt: any = { at: iso(now()), failures: ok ? 0 : pget(prev, "failures", 0) + 1 };
   if (!ok) attempt.error = status;
   writeAtomic(P(CACHE, "queue-attempt.json"), dumps(attempt));
@@ -54,7 +55,7 @@ export function refreshRetryAt(attempt: any): Dt | null {
 
 // How many new candidates plan could take, from the entries alone (the
 // same count plan uses, so it needs no candidate data).
-export function roomNow(target = TARGET): number {
+export function roomNow(target = BANK_TARGET): number {
   const es = entries();
   const active = es.filter((e) => ACTIVE.has(e.state) && e.state !== "stale" && e.lane !== "screen");
   const stale = es.filter((e) => e.state === "stale");
@@ -65,7 +66,7 @@ export function roomNow(target = TARGET): number {
 // set, hold, or unhold they ran, or an action of theirs that a sync read
 // back from GitHub.
 export function lastActivity(): Dt | null {
-  const times: any[] = [pget(readCacheJson("activity.json"), "at")];
+  const times: any[] = [pget(readCacheJson<any>("activity.json"), "at")];
   times.push(...entries().filter((e) => startsWithAny(pget(e, "disposition", "-"), USER_DISPOSITIONS))
     .map((e) => pget(e, "disposition_at")));
   const ts = times.filter((t) => t && t !== "-").map((t) => parseIso(t));
@@ -75,7 +76,7 @@ export function lastActivity(): Dt | null {
 }
 
 // Why fresh candidates aren't needed now, or null.
-export function dormant(target = TARGET): string | null {
+export function dormant(target = BANK_TARGET): string | null {
   if (roomNow(target) === 0) return "bank full";
   const last = lastActivity();
   if (!last) return "no recorded activity";
@@ -87,9 +88,9 @@ export function dormant(target = TARGET): string | null {
 // when it doesn't. A failed refresh backs off first. A missing stamp
 // refreshes. A stale stamp refreshes unless the bank is dormant, and every
 // REFRESH_MAX_HOURS regardless.
-export function queueDue(force: boolean, target = TARGET): [boolean, string | null] {
+export function queueDue(force: boolean, target = BANK_TARGET): [boolean, string | null] {
   if (force) return [true, null];
-  const attempt = readCacheJson("queue-attempt.json");
+  const attempt = readCacheJson<any>("queue-attempt.json");
   const retry = refreshRetryAt(attempt);
   if (retry && now().t < retry.t) {
     return [false, `last refresh failed ${py(attempt.failures)} time(s) in a row ` +
@@ -100,7 +101,7 @@ export function queueDue(force: boolean, target = TARGET): [boolean, string | nu
   const stamp = exists(stampPath) ? parseIso(readText(stampPath)) : null;
   if (!stamp) return [true, null];
   const age = now().t - stamp.t;
-  if (age <= minutes(REFRESH_MIN)) return [false, `cached from ${iso(stamp)} (REFRESH_MINUTES=${REFRESH_MIN})`];
+  if (age <= minutes(REFRESH_MINUTES)) return [false, `cached from ${iso(stamp)} (REFRESH_MINUTES=${REFRESH_MINUTES})`];
   if (age > hours(REFRESH_MAX_HOURS)) return [true, null];
   const why = dormant(target);
   if (why) {
@@ -117,7 +118,7 @@ export function fetchMeta(nums: number[]): void {
     const fields = nums.slice(i, i + 40).map((n) =>
       `p${n}: pullRequest(number:${n}){number title isDraft state updatedAt headRefOid ` +
       "author{login} files(first:100){nodes{path}}}").join(" ");
-    const repo = graphql(`query{repository(owner:"${OWNER}",name:"${NAME}"){${fields}}}`);
+    const repo = graphql<any>(`query{repository(owner:"${OWNER}",name:"${NAME}"){${fields}}}`);
     for (const d of Object.values<any>(repo)) {
       if (truthy(d)) {
         meta[String(d.number)] = {
@@ -135,7 +136,7 @@ export function fetchMeta(nums: number[]): void {
 
 export function refreshRereview(): string {
   const p = run(["python3", P(RQ, "rereview.py"), "--tsv"], { env: ENV });
-  if (p.returncode !== 0) return `FAILED (${cut(splitlines(strip(p.stderr)).at(-1) ?? "?", 0, 120)}); kept previous rows`;
+  if (p.status !== 0) return `FAILED (${cut(splitlines(strip(p.stderr)).at(-1) ?? "?", 0, 120)}); kept previous rows`;
   writeAtomic(P(CACHE, "rereview.tsv"), p.stdout);
   return `${splitlines(p.stdout).length} reviewed PRs`;
 }
@@ -164,7 +165,7 @@ export function landingAt(created: string | null | undefined, labels: Iterable<s
 }
 
 // ci-status.sh for cq candidates whose cached result is missing, for
-// another head, or older than CQ_CI_MAX_AGE, oldest result first, skipping
+// another head, or older than (CQ_CI_MAX_AGE_MINUTES * 60), oldest result first, skipping
 // candidates plan would skip anyway. plan reads the cache. A result is keyed
 // by the head ci-status.sh reports, which can differ from the candidate's.
 export function refreshCqCi(): string {
@@ -176,7 +177,7 @@ export function refreshCqCi(): string {
     const held = e && e.state === "waiting" && "ci" in wakeConditions(e);
     if (c.lane !== "cq" || (e && e.state !== "done" && !held) || skipReason(c, e)) continue;
     const r = pget(ci, c.pr);
-    if (ciAt(r, c.head) && (now().t - parseIso(r.at)!.t) / 1000 < CQ_CI_MAX_AGE) continue;
+    if (ciAt(r, c.head) && (now().t - parseIso(r.at)!.t) / 1000 < (CQ_CI_MAX_AGE_MINUTES * 60)) continue;
     todo.push(c);
   }
   todo = sorted(todo, (c) => pget(pget(ci, c.pr) || {}, "at", ""));
@@ -253,7 +254,7 @@ export function skipReason(c: Candidate, e: Entry | null): string | null {
   return null;
 }
 
-export function plan(target = TARGET, showAll = false): [string[], string] {
+export function plan(target = BANK_TARGET, showAll = false): [string[], string] {
   const bank = new Map(entries().map((e) => [e.pr, e] as const));
   const ci = readCi();
   // Screen entries need no preparation, so they don't use the bank's room.

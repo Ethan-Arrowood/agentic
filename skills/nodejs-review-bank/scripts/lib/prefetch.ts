@@ -1,12 +1,15 @@
+import { type RunResult } from "./util.ts";
+
+import { ARCHIVE, BANK_METADATA, CACHE, CLONE, DOSSIER, ENV, LOCKS, METADATA_TIMEOUT, NAME, NC, OWNER, REPO, RQ } from "./config.ts";
+import { OSError, P, RuntimeError, TimeoutExpired, WS, cut, dict, dumps, exists, isOSError, iso, mtime, now, pct, pget, py, pyInt, pyStr, splitWs, splitlines, strip, truthy } from "./py.ts";
+import { die, git, isDir, print, readText, removeTree, run, writeAtomic, writeText } from "./util.ts";
+
 import fs from "node:fs";
-import { ARCHIVE, CACHE, CLONE, DOSSIER, ENV, LOCKS, NAME, NC, OWNER, REPO, RQ } from "./config.ts";
 import { type Candidate, type Entry, entryPath, finish, load, save } from "./entry.ts";
 import { gh, graphql } from "./github.ts";
 import { entryLock, unlock, zshFlock } from "./lock.ts";
-import { OSError, P, RuntimeError, TimeoutExpired, WS, cut, dict, dumps, isOSError, pct, pget, py, pyInt, pyStr, splitWs, splitlines, strip, truthy } from "./py.ts";
 import { rankedCandidates } from "./queue.ts";
 import { screen, screenBody, screenLine } from "./screen.ts";
-import { type Proc, die, exists, git, isDir, iso, mtime, now, print, readText, rmtree, run, writeAtomic, writeText } from "./util.ts";
 
 // Finish the entry for a PR prefetch won't prepare, creating one if
 // needed. Its updated_at comes from GitHub, so skipReason prefers it over
@@ -56,7 +59,7 @@ export function prefetch(n0: string): void {
   const lane = cand.lane || (old || {}).lane || "fresh";
   const rf = cand.rereview_from || pget(old || {}, "rereview_from");
   if (rf && rf !== "-" && run(["git", "-C", CLONE, "cat-file", "-e", `${rf}^{commit}`],
-    { stdout: "inherit", stderr: "devnull" }).returncode !== 0) {
+    { stdout: "inherit", stderr: "ignore" }).status !== 0) {
     // A force-push can leave the reviewed commit unreachable from the PR.
     git(["fetch", "-q", "--no-write-fetch-head", "upstream", rf], { check: false });
   }
@@ -65,7 +68,7 @@ export function prefetch(n0: string): void {
   try {
     swapIn(n, newDir, tmpRef, pr, info, head, lane, rf, cand);
   } finally {
-    rmtree(newDir);
+    removeTree(newDir);
     git(["update-ref", "-d", tmpRef], { check: false });
   }
 }
@@ -83,15 +86,15 @@ export function swapIn(n: string, newDir: string, tmpRef: string, pr: string, in
   }
   writeText(P(newDir, "screen.json"), dumps(sc, 1));
   const screened = sc.result !== "pass";
-  let ci: Proc | null = null, gates: string | null = null;
+  let ci: RunResult | null = null, gates: string | null = null;
   if (!screened) {
     // A screened PR gets no review, so skip the CI and gates calls.
     ci = run([P(NC, "ci-status.sh"), n], { env: ENV, stderr: "stdout" });
-    writeText(P(newDir, "ci.txt"), `${ci.stdout}(ci-status.sh exit ${ci.returncode}, ${iso(now())})\n`);
+    writeText(P(newDir, "ci.txt"), `${ci.stdout}(ci-status.sh exit ${ci.status}, ${iso(now())})\n`);
     gates = writeGates(n, newDir, info, head, tmpRef);
   }
   writeText(P(newDir, "release-lines.txt"), activeLines());
-  if (!screened && (METADATA === "all" || (METADATA === "cq" && lane === "cq"))) {
+  if (!screened && (BANK_METADATA === "all" || (BANK_METADATA === "cq" && lane === "cq"))) {
     // After the gh calls: git node metadata calls GitHub and Jenkins itself.
     writeText(P(newDir, "metadata.txt"), ncuMetadata(n));
   }
@@ -138,7 +141,7 @@ export function swapIn(n: string, newDir: string, tmpRef: string, pr: string, in
     }
     save(e!);
     git(["update-ref", `refs/review-bank/${n}`, tmpRef]);
-    rmtree(gone);
+    removeTree(gone);
   }
   if (screened) {
     print(`${n}: dossier ${d}\n  ref refs/review-bank/${n} = ${head.slice(0, 12)}, lane screen, state ready`);
@@ -155,7 +158,7 @@ export function swapIn(n: string, newDir: string, tmpRef: string, pr: string, in
 // inline threads, without hidden or blocked-user content.
 export function discussion(n: string): string {
   const p = run(["zsh", P(RQ, "discussion.sh"), "--json", n], { env: ENV });
-  if (p.returncode !== 0) throw new RuntimeError(`discussion.sh ${n}: ${cut(strip(p.stderr), -300)}`);
+  if (p.status !== 0) throw new RuntimeError(`discussion.sh ${n}: ${cut(strip(p.stderr), -300)}`);
   const d = JSON.parse(p.stdout);
   d.fetched_at = iso(now());
   d.rules = "excluded items are not credited and don't count as already raised; " +
@@ -163,8 +166,6 @@ export function discussion(n: string): string {
   return dumps(d, 1);
 }
 
-export const METADATA = process.env.BANK_METADATA ?? "cq"; // which lanes get metadata.txt: cq, all, or off
-export const METADATA_TIMEOUT = 180;
 export const PASSING = new Set(["SUCCESS", "SKIPPED", "NEUTRAL"]);
 export const GATES_QUERY = `query{repository(owner:"%s",name:"%s"){pullRequest(number:%s){
  reviewDecision
@@ -190,7 +191,7 @@ export function writeGates(n: string, newDir: string, info: any, head: string, r
   const at = iso(now());
   let pr: any, err: string | null = null;
   try {
-    pr = graphql(pct(GATES_QUERY, OWNER, NAME, n)).pullRequest;
+    pr = graphql<any>(pct(GATES_QUERY, OWNER, NAME, n)).pullRequest;
     if (!truthy(pr)) throw new RuntimeError("pull request not found");
   } catch (e) {
     if (!(e instanceof RuntimeError)) throw e;
@@ -359,7 +360,7 @@ export function ncuMetadata(n: string): string {
     try {
       const p = run(["git", "node", "metadata", n, "--owner", OWNER, "--repo", NAME],
         { cwd: isDir(CLONE) ? CLONE : undefined, env: ENV, timeout: METADATA_TIMEOUT });
-      [out, err, status] = [p.stdout, p.stderr, `exit ${p.returncode}`];
+      [out, err, status] = [p.stdout, p.stderr, p.timedOut ? `timed out after ${METADATA_TIMEOUT}s` : `exit ${p.status}`];
     } catch (e) {
       if (e instanceof TimeoutExpired) [out, err, status] = [e.stdout, e.stderr, `timed out after ${METADATA_TIMEOUT}s`];
       else if (isOSError(e)) [out, err, status] = ["", pyStr(e), "could not run"];

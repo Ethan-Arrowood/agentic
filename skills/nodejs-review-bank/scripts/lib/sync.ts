@@ -1,11 +1,12 @@
-import { LEASE_MIN, NAME, OWNER, SCREEN_HOURS } from "./config.ts";
+import { LEASE_MINUTES, NAME, OWNER, SCREEN_HOURS } from "./config.ts";
+import { BOL, type Dt, WS, add, cmp, cut, hours, iso, maxDt, now, parseIso, pct, pget, pyInt, sorted, startsWithAny, truthy } from "./py.ts";
+import { readTsv } from "./util.ts";
+
 import { type Conditions, type Entry, LANE_OF_BUCKET, describeWait, dropInputs, entries, finish, load, save, wakeConditions } from "./entry.ts";
 import { graphql, me } from "./github.ts";
 import { entryLock } from "./lock.ts";
-import { BOL, type Dt, WS, add, cmp, cut, hours, maxDt, pct, pget, pyInt, sorted, startsWithAny, truthy } from "./py.ts";
 import { ciAt, landingAt, readCi } from "./queue.ts";
 import { closeBody } from "./screen.ts";
-import { iso, now, parseIso, readTsv } from "./util.ts";
 
 export const SYNC_FIELDS = (
   "number title state isDraft createdAt updatedAt closedAt headRefOid author{login} " +
@@ -27,7 +28,7 @@ export function sync(only: Set<string> | null = null): string[] {
   const data = new Map<string, any>();
   for (let i = 0; i < nums.length; i += 20) {
     const fields = nums.slice(i, i + 20).map((n) => `p${n}: pullRequest(number:${n}){${pct(SYNC_FIELDS, me())}}`).join(" ");
-    for (const d of Object.values<any>(graphql(`query{repository(owner:"${OWNER}",name:"${NAME}"){${fields}}}`))) {
+    for (const d of Object.values<any>(graphql<any>(`query{repository(owner:"${OWNER}",name:"${NAME}"){${fields}}}`))) {
       if (truthy(d)) data.set(String(d.number), d);
     }
   }
@@ -133,7 +134,7 @@ export function syncEntry(e: Entry, d: any, rr: Map<string, string[]>): string[]
     e.note = `head moved from ${e.head.slice(0, 12)} while ${e.state}`;
     e.state = "stale";
     log.push(`  ${n}: stale, ${e.note}`);
-  } else if (e.state === "preparing" && (now().t - (parseIso(e.lease) ?? now()).t) / 1000 > LEASE_MIN * 60) {
+  } else if (e.state === "preparing" && (now().t - (parseIso(e.lease) ?? now()).t) / 1000 > LEASE_MINUTES * 60) {
     e.state = "stale";
     e.note = "preparation abandoned (lease expired)";
     log.push(`  ${n}: ${e.note}`);

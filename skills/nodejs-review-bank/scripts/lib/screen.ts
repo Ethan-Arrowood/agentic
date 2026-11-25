@@ -1,7 +1,8 @@
 import { CACHE, REPO, SCREEN_HOURS } from "./config.ts";
+import { B, BOL, DOT, EOL, P, RuntimeError, WS, cut, dumps, isOSError, isValueError, mtime, pget, py, sorted, splitWs, splitlines, strip } from "./py.ts";
+import { git, readText, writeAtomic } from "./util.ts";
+
 import { type Entry } from "./entry.ts";
-import { B, BOL, DOT, EOL, P, RuntimeError, WS, cut, dumps, isOSError, isValueError, pget, py, sorted, splitWs, splitlines, strip } from "./py.ts";
-import { git, mtime, readText, writeAtomic } from "./util.ts";
 
 // The automation screen. Node's AI policy (doc/contributing/ai-guidelines.md)
 // allows AI help, but automated tooling must not open pull requests without

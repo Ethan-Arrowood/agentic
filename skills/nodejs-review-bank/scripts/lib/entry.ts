@@ -1,7 +1,8 @@
-import fs from "node:fs";
 import { DOSSIER, PRS } from "./config.ts";
-import { EPOCH, type Key, P, dict, partition, pget, py, splitlines, stem, strip, unset } from "./py.ts";
-import { die, exists, git, iso, now, parseIso, readText, rmtree, writeAtomic } from "./util.ts";
+import { EPOCH, type Key, P, dict, exists, iso, now, parseIso, partition, pget, py, splitlines, stem, strip, unset } from "./py.ts";
+import { die, git, readText, removeTree, writeAtomic } from "./util.ts";
+
+import fs from "node:fs";
 
 // screen: PRs that failed the automation screen or were unclear. The user
 // handles them by hand; they need no preparing agent, so they come first.
@@ -94,7 +95,7 @@ export function finish(e: Entry, disposition: string, when: string | null = null
 
 // Remove an entry's dossier and fetched ref.
 export function dropInputs(n: string): void {
-  rmtree(P(DOSSIER, String(n)));
+  removeTree(P(DOSSIER, String(n)));
   git(["update-ref", "-d", `refs/review-bank/${n}`], { check: false });
 }
 

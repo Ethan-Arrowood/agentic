@@ -7,7 +7,8 @@ import path from "node:path";
 // ---------------------------------------------------------------------------
 
 // Python's exception types, where bank.py catches or reports them by type.
-export class RuntimeError extends Error {}
+export { CommandError as RuntimeError } from "./util.ts";
+import { CommandError as RuntimeError } from "./util.ts";
 export class ValueError extends Error {}
 export class OSError extends Error {}
 export class KeyError extends Error {}
@@ -16,7 +17,7 @@ export class TimeoutExpired extends Error {
   stdout = "";
   stderr = "";
 }
-for (const c of [RuntimeError, ValueError, OSError, KeyError, AttributeError, TimeoutExpired]) c.prototype.name = c.name;
+for (const c of [ValueError, OSError, KeyError, AttributeError, TimeoutExpired]) c.prototype.name = c.name;
 // sys.exit: thrown, so finally blocks and `using` locks unwind as in Python.
 export class SystemExit {
   code: number;
@@ -340,3 +341,36 @@ export const STRERROR: Record<string, string> = {
   ENOENT: "No such file or directory", EACCES: "Permission denied", ENOTDIR: "Not a directory",
   ENOEXEC: "Exec format error", E2BIG: "Argument list too long",
 };
+
+// ---------------------------------------------------------------------------
+// Old helpers kept until each module moves to lib/util.ts.
+// ---------------------------------------------------------------------------
+
+export function now(): Dt {
+  return { t: Math.floor(Date.now() / 1000) * 1000, off: 0 };
+}
+
+export function iso(dt: Dt): string {
+  if (!dt) throw new AttributeError("'NoneType' object has no attribute 'strftime'");
+  const d = new Date(Math.floor(dt.t + dt.off));
+  const p2 = (n: number) => String(n).padStart(2, "0");
+  return `${String(d.getUTCFullYear()).padStart(4, "0")}-${p2(d.getUTCMonth() + 1)}-${p2(d.getUTCDate())}` +
+    `T${p2(d.getUTCHours())}:${p2(d.getUTCMinutes())}:${p2(d.getUTCSeconds())}Z`;
+}
+
+export function parseIso(s: string | null | undefined): Dt | null {
+  if (!s || s === "-") return null;
+  const t = strip(s).replaceAll("Z", "+00:00");
+  const dt = fromIsoFormat(t);
+  if (!dt) throw new ValueError(`Invalid isoformat string: ${repr(t)}`);
+  return dt;
+}
+
+export function mtime(p: string): number {
+  return fs.statSync(p).mtimeMs / 1000;
+}
+
+export function exists(p: string): boolean {
+  return fs.existsSync(p);
+}
+

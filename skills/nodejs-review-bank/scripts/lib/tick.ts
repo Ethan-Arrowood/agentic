@@ -1,16 +1,17 @@
+import { BANK_TARGET, CACHE, TICK_BACKOFF_BASE_MINUTES, TICK_BACKOFF_MAX_MINUTES, TICK_GRACE_MINUTES } from "./config.ts";
+import { P, RuntimeError, add, cut, dumps, isOSError, isValueError, iso, minutes, now, nth, parseIso, pget, py, pyInt, pyStr } from "./py.ts";
+import { die, print, readCacheJson, writeAtomic } from "./util.ts";
+
 import { listCmd } from "./commands.ts";
-import { CACHE, TARGET, TICK_BASE_MIN, TICK_GRACE_MIN, TICK_MAX_MIN } from "./config.ts";
 import { imageTick } from "./images.ts";
 import { Flock } from "./lock.ts";
-import { P, RuntimeError, add, cut, dumps, isOSError, isValueError, minutes, nth, pget, py, pyInt, pyStr } from "./py.ts";
 import { plan, queueDue, refreshCqCi, refreshQueue, refreshRereview } from "./queue.ts";
 import { sync } from "./sync.ts";
-import { die, iso, now, parseIso, print, readCacheJson, writeAtomic } from "./util.ts";
 
 // The user ran a bank command: note it, and end any tick backoff.
 export function markActive(): void {
   writeAtomic(P(CACHE, "activity.json"), dumps({ at: iso(now()) }));
-  const st = readCacheJson("tick.json");
+  const st = readCacheJson<any>("tick.json");
   if (pget(st, "quiet") || pget(st, "next_due")) {
     writeAtomic(P(CACHE, "tick.json"), dumps({ quiet: 0, next_due: null, last: pget(st, "last") }));
   }
@@ -19,8 +20,8 @@ export function markActive(): void {
 // The one line a backed-off tick prints, or null when a real tick is due.
 // Reads only the cache: no gh, no git.
 export function tickBackedOff(): string | null {
-  if (TICK_MAX_MIN <= 0) return null;
-  const st = readCacheJson("tick.json");
+  if (TICK_BACKOFF_MAX_MINUTES <= 0) return null;
+  const st = readCacheJson<any>("tick.json");
   const due = pget(st, "next_due") ? parseIso(st.next_due) : null;
   if (!due || now().t >= due.t) return null;
   return `tick ${iso(now())}: backed off after ${py(pget(st, "quiet", 0))} quiet ticks in a row; ` +
@@ -32,12 +33,12 @@ export function tickBackedOff(): string | null {
 // TICK_BACKOFF_MAX_MINUTES. Any change resets it. Returns a report line.
 export function recordTick(changed: boolean): string {
   let st: { quiet: number; next_due: string | null; last: string };
-  if (changed || TICK_MAX_MIN <= 0) {
+  if (changed || TICK_BACKOFF_MAX_MINUTES <= 0) {
     st = { quiet: 0, next_due: null, last: iso(now()) };
   } else {
-    const q = pget(readCacheJson("tick.json"), "quiet", 0) + 1;
-    const mins = Math.min(TICK_BASE_MIN * 2 ** (q - 1), TICK_MAX_MIN);
-    const due = mins > TICK_BASE_MIN ? add(now(), minutes(mins - TICK_GRACE_MIN)) : null;
+    const q = pget(readCacheJson<any>("tick.json"), "quiet", 0) + 1;
+    const mins = Math.min(TICK_BACKOFF_BASE_MINUTES * 2 ** (q - 1), TICK_BACKOFF_MAX_MINUTES);
+    const due = mins > TICK_BACKOFF_BASE_MINUTES ? add(now(), minutes(mins - TICK_GRACE_MINUTES)) : null;
     st = { quiet: q, next_due: due ? iso(due) : null, last: iso(now()) };
   }
   writeAtomic(P(CACHE, "tick.json"), dumps(st));
@@ -47,14 +48,13 @@ export function recordTick(changed: boolean): string {
 }
 
 // One tick: refresh the candidates, sync, check cq CI and the image, then plan.
-export async function tickCmd(args: string[]): Promise<void> {
-  const target = args.includes("--target") ? pyInt(nth(args, args.indexOf("--target") + 1)) : TARGET;
+export async function tickCmd(target: number, refresh: boolean): Promise<void> {
   const lock = new Flock("tick");
   if (!lock.acquire(false)) die("another tick is running", 0);
   let changed = false;
   try {
     print(`tick ${iso(now())}`);
-    const [due, why] = queueDue(args.includes("--refresh"), target);
+    const [due, why] = queueDue(refresh, target);
     print(`  team queue: ${due ? refreshQueue() : why}`);
     print(`  re-review lane: ${refreshRereview()}`);
     for (const l of sync()) {

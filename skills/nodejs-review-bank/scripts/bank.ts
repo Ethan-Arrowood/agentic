@@ -1,19 +1,17 @@
 #!/usr/bin/env node
-// The bank. Node runs it as is (type stripping): no dependencies, no build.
-// The work is in lib/. It started as a function-for-function port of bank.py,
-// so lib/py.ts still reproduces the Python behavior it relies on.
+// The bank: usage, argument parsing, and dispatch. The work is in lib/.
+// Node runs it as is (type stripping): no dependencies, no build.
 import { deferCmd, holdCmd, listCmd, present, put, setCmd, show, unholdCmd } from "./lib/commands.ts";
-import { TARGET } from "./lib/config.ts";
+import { BANK_TARGET, ensureBankDirs } from "./lib/config.ts";
 import { load } from "./lib/entry.ts";
 import { me } from "./lib/github.ts";
 import { imageCmd } from "./lib/images.ts";
 import { prefetch } from "./lib/prefetch.ts";
-import { RuntimeError, SystemExit, nth, pyInt } from "./lib/py.ts";
 import { plan } from "./lib/queue.ts";
 import { slotCmd } from "./lib/slots.ts";
 import { sync } from "./lib/sync.ts";
 import { markActive, tickBackedOff, tickCmd } from "./lib/tick.ts";
-import { die, print } from "./lib/util.ts";
+import { BankError, die, print, printErr } from "./lib/util.ts";
 
 const DOC = `nodejs-review-bank: a bank of prepared nodejs/node reviews on disk.
 
@@ -54,12 +52,31 @@ TICK_BACKOFF_MAX_MINUTES (cap on the no-change backoff; default 240, 0 turns
 it off).
 `;
 
+// The argument at i. A missing one exits 1, as it always has.
+function arg(args: string[], i: number, usage: string): string {
+  return args[i] ?? die(`usage: ${usage}`);
+}
+
+// The value after flag, or null when the flag is absent.
+function option(args: string[], flag: string, usage: string): string | null {
+  const i = args.indexOf(flag);
+  return i < 0 ? null : arg(args, i + 1, usage);
+}
+
+function target(args: string[], cmd: string): number {
+  const v = option(args, "--target", `${cmd} --target N`);
+  if (v === null) return BANK_TARGET;
+  if (!/^[+-]?\d+$/.test(v.trim())) die(`--target must be a whole number, not ${v}`);
+  return Number(v);
+}
+
 async function main(argv: string[]): Promise<void> {
+  ensureBankDirs();
   if (!argv.length) {
     print(DOC);
     return;
   }
-  const [cmd, args] = [argv[0], argv.slice(1)];
+  const [cmd, ...args] = argv;
   if (cmd === "tick" && !args.some((a) => ["--now", "--force", "--refresh"].includes(a))) {
     // Before me() and the lock: a backed-off tick makes no gh call.
     const line = tickBackedOff();
@@ -70,62 +87,74 @@ async function main(argv: string[]): Promise<void> {
   }
   if (["tick", "sync", "plan", "prefetch"].includes(cmd)) me();
   if (["sync", "present", "prefetch", "put", "set", "hold", "unhold"].includes(cmd)) markActive();
-  if (cmd === "tick") {
-    await tickCmd(args);
-  } else if (cmd === "sync") {
-    print(sync(args.length ? new Set(args) : null).join("\n"));
-  } else if (cmd === "plan") {
-    const target = args.includes("--target") ? pyInt(nth(args, args.indexOf("--target") + 1)) : TARGET;
-    const [lines, counts] = plan(target, args.includes("--all"));
-    print(`plan: eligible candidates by lane: ${counts}`);
-    print(lines.join("\n") || "plan: bank is full");
-  } else if (cmd === "list") {
-    listCmd(args.includes("--all"));
-  } else if (cmd === "show") {
-    show(load(nth(args, 0)) ?? die(`no entry for ${args[0]}`));
-  } else if (cmd === "present") {
-    present();
-  } else if (cmd === "prefetch") {
-    prefetch(nth(args, 0));
-  } else if (cmd === "put") {
-    const hd = args.includes("--head") ? nth(args, args.indexOf("--head") + 1) : null;
-    put(nth(args, 0), nth(args, 1), hd);
-  } else if (cmd === "set") {
-    setCmd(nth(args, 0), args.slice(1));
-  } else if (cmd === "hold") {
-    holdCmd(nth(args, 0), args.slice(1));
-  } else if (cmd === "defer") {
-    if (!args.length) die("usage: defer <pr> <reason...>", 2);
-    deferCmd(args[0], args.slice(1));
-  } else if (cmd === "unhold") {
-    unholdCmd(nth(args, 0));
-  } else if (cmd === "slot") {
-    slotCmd(args);
-  } else if (cmd === "image") {
-    imageCmd(args);
-  } else {
-    die(`unknown command ${cmd}`, 2);
+  switch (cmd) {
+    case "tick":
+      await tickCmd(target(args, "tick"), args.includes("--refresh"));
+      break;
+    case "sync":
+      print(sync(args.length ? new Set(args) : null).join("\n"));
+      break;
+    case "plan": {
+      const [lines, counts] = plan(target(args, "plan"), args.includes("--all"));
+      print(`plan: eligible candidates by lane: ${counts}`);
+      print(lines.join("\n") || "plan: bank is full");
+      break;
+    }
+    case "list":
+      listCmd(args.includes("--all"));
+      break;
+    case "show": {
+      const pr = arg(args, 0, "show <pr>");
+      show(load(pr) ?? die(`no entry for ${pr}`));
+      break;
+    }
+    case "present":
+      present();
+      break;
+    case "prefetch":
+      prefetch(arg(args, 0, "prefetch <pr>"));
+      break;
+    case "put": {
+      const usage = "put <pr> <summary.md> [--head <sha>]";
+      const head = option(args, "--head", usage);
+      put(arg(args, 0, usage), arg(args, 1, usage), head);
+      break;
+    }
+    case "set":
+      setCmd(arg(args, 0, "set <pr> key=value..."), args.slice(1));
+      break;
+    case "hold":
+      holdCmd(arg(args, 0, "hold <pr> [--until ISO] [--until-reviews N] [--until-author] [note]"), args.slice(1));
+      break;
+    case "defer":
+      if (!args.length) die("usage: defer <pr> <reason...>", 2);
+      deferCmd(args[0], args.slice(1));
+      break;
+    case "unhold":
+      unholdCmd(arg(args, 0, "unhold <pr>"));
+      break;
+    case "slot":
+      slotCmd(args);
+      break;
+    case "image":
+      imageCmd(args);
+      break;
+    default:
+      die(`unknown command ${cmd}`, 2);
   }
 }
 
-// if __name__ == "__main__": a RuntimeError ends the run with its message;
-// anything else prints its stack and exits 1, like a Python traceback.
+// A BankError ends the run with its message and exit code; anything else is
+// a bug, so it prints its stack and exits 1.
 let code = 0;
 try {
   await main(process.argv.slice(2));
 } catch (err) {
-  let e = err;
-  if (e instanceof RuntimeError) {
-    try {
-      die(e.message);
-    } catch (x) {
-      e = x;
-    }
-  }
-  if (e instanceof SystemExit) {
-    code = e.code;
+  if (err instanceof BankError) {
+    printErr(`bank: ${err.message}`);
+    code = err.code;
   } else {
-    print((e as Error)?.stack ?? String(e), 2);
+    printErr(err instanceof Error && err.stack ? err.stack : String(err));
     code = 1;
   }
 }

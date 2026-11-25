@@ -1,17 +1,18 @@
+import { BANK_SCRIPT, CACHE, DEVC_IMAGE, ENV, IMAGE_CHECK_MINUTES, MOVE, NC } from "./config.ts";
+import { type Dt, KeyError, OSError, P, STRERROR, ValueError, cut, dumps, exists, isOSError, isValueError, iso, item, now, parseIso, pget, py, pyStr, repr, rpartition, splitWs, strip, truthy } from "./py.ts";
+import { die, print, readCacheJson, run, writeAtomic } from "./util.ts";
+
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn as spawnChild } from "node:child_process";
-import { CACHE, DEVC_IMAGE, ENV, IMAGE_CHECK_MIN, MOVE, NC, THIS } from "./config.ts";
 import { Flock, SlotLock, running, workerLock } from "./lock.ts";
-import { type Dt, KeyError, OSError, P, STRERROR, ValueError, cut, dumps, isOSError, isValueError, item, pget, py, pyStr, repr, rpartition, splitWs, strip, truthy } from "./py.ts";
 import { type SlotRow, checkoutState, devcInfo, reclaimMoves, slots } from "./slots.ts";
-import { die, exists, iso, now, parseIso, print, readCacheJson, run, writeAtomic } from "./util.ts";
 
 // Whether ISO time t is under IMAGE_CHECK_MINUTES ago.
 export function recent(t: string | null | undefined): boolean {
   const d = t ? parseIso(t) : null;
-  return Boolean(d) && (now().t - d!.t) / 1000 < IMAGE_CHECK_MIN * 60;
+  return Boolean(d) && (now().t - d!.t) / 1000 < IMAGE_CHECK_MINUTES * 60;
 }
 
 // The UTC time at the start of an engine or Docker Hub timestamp
@@ -60,7 +61,7 @@ export async function urlopen(url: string, timeout: number): Promise<string> {
 // Docker Hub's view of the tag (its digests and last_updated), fetched at
 // most every IMAGE_CHECK_MINUTES. A failed fetch keeps the last good result.
 export async function hubInfo(): Promise<any> {
-  const old = readCacheJson("image-hub.json");
+  const old = readCacheJson<any>("image-hub.json");
   if (recent(pget(old, "checked_at"))) return old;
   const url = hubUrl();
   if (!url) return { error: `${DEVC_IMAGE} is not a Docker Hub tag` };
@@ -93,7 +94,7 @@ export function imageNewer(local: Record<string, string>, hub: any): boolean {
 export function spawn(args: string[], log: string): void {
   const fd = fs.openSync(P(CACHE, log), "w");
   try {
-    const child = spawnChild(process.execPath, [...process.execArgv, THIS, ...args],
+    const child = spawnChild(process.execPath, [...process.execArgv, BANK_SCRIPT, ...args],
       { env: ENV, stdio: ["ignore", fd, fd], detached: true });
     child.on("error", () => {});
     if (!child.pid) throw new OSError(`could not start ${process.execPath}`);
@@ -120,7 +121,7 @@ export async function imageTick(): Promise<string[]> {
   if (pget(hub, "last_updated")) line += `, Docker Hub updated ${cut(hub.last_updated, 0, 16)}`;
   if (pget(hub, "error")) line += ` (check failed: ${cut(hub.error, 0, 80)})`;
   const held = rows.filter(([, , h]) => truthy(h)).map(([n, , h]) => `slot ${n} for #${py(item(h, "pr"))}`);
-  const last = readCacheJson("image-pull.json");
+  const last = readCacheJson<any>("image-pull.json");
   const log = P(CACHE, "image-pull.log");
   if (running("image-pull")) return [...out, `${line}; pull running since ${py(pget(last, "started_at", "?"))} (log ${log})`];
   if (!truthy(pget(hub, "digests"))) {
@@ -134,7 +135,7 @@ export async function imageTick(): Promise<string[]> {
   } else if (recent(pget(last, "started_at"))) {
     const how = Object.hasOwn(last, "rc") ? `exited ${py(last.rc)}` : "did not finish";
     out.push(`${line}; newer on Docker Hub, but the pull at ${last.started_at} ${how}; ` +
-      `retried ${IMAGE_CHECK_MIN} minutes after it (log ${log})`);
+      `retried ${IMAGE_CHECK_MINUTES} minutes after it (log ${log})`);
   } else {
     writeAtomic(P(CACHE, "image-pull.json"), dumps(
       { started_at: iso(now()), from: local.image_id, path: first[1] }));
@@ -152,7 +153,7 @@ export function moveOne(rows: SlotRow[], info: Map<string, Record<string, string
     const [n, , h] = moving[0];
     return [`slot ${n}: moving to ${py(pget(h, "to", "?"))} since ${py(item(h, "at"))} (log ${P(CACHE, `image-move-${n}.log`)})`];
   }
-  const moves = readCacheJson("image-moves.json"), out: string[] = [];
+  const moves = readCacheJson<any>("image-moves.json"), out: string[] = [];
   for (const [name, p, h] of rows) {
     const i = info.get(name);
     if (!truthy(i) || i!.outdated !== "yes") continue;
@@ -188,8 +189,8 @@ export function runPull(p: string): void {
   const lock = workerLock("image-pull");
   if (!lock) die("another pull is running", 0);
   print(`=== devc.sh pull in ${p} @ ${iso(now())}`);
-  const rc = run([P(NC, "devc.sh"), "pull"], { cwd: p, env: ENV, stdout: "inherit", stderr: "inherit" }).returncode;
-  const rec = readCacheJson("image-pull.json");
+  const rc = run([P(NC, "devc.sh"), "pull"], { cwd: p, env: ENV, stdout: "inherit", stderr: "inherit" }).status;
+  const rec = readCacheJson<any>("image-pull.json");
   Object.assign(rec, { rc, finished_at: iso(now()) });
   writeAtomic(P(CACHE, "image-pull.json"), dumps(rec));
   print(`=== exit ${rc} @ ${iso(now())}`);
@@ -215,11 +216,11 @@ export function runMove(name: string): void {
     } else {
       for (const step of ["down", "build"]) {
         print(`=== devc.sh ${step} in ${p} @ ${iso(now())}`);
-        Object.assign(rec, { step, rc: run([P(NC, "devc.sh"), step], { cwd: p, env: ENV, stdout: "inherit", stderr: "inherit" }).returncode });
+        Object.assign(rec, { step, rc: run([P(NC, "devc.sh"), step], { cwd: p, env: ENV, stdout: "inherit", stderr: "inherit" }).status });
         if (rec.rc) break;
       }
     }
-    const moves = readCacheJson("image-moves.json");
+    const moves = readCacheJson<any>("image-moves.json");
     moves[name] = { ...rec, finished_at: iso(now()) };
     writeAtomic(P(CACHE, "image-moves.json"), dumps(moves));
     print(`=== slot ${name}: ${py(pget(rec, "step"))} exit ${py(pget(rec, "rc"))} @ ${iso(now())}`);

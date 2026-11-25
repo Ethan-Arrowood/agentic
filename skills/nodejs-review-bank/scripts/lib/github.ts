@@ -1,59 +1,63 @@
+// GitHub, through the gh shim in bin/. Read-only: nothing here posts.
 import fs from "node:fs";
-import { CACHE, ENV, RETRY_SLEEP } from "./config.ts";
-import { P, RuntimeError, cut, fmt0, pget, strip, truthy } from "./py.ts";
-import { type Proc, print, run, sleep, writeText } from "./util.ts";
+import path from "node:path";
+import { CACHE, ENV, GH_RETRY_SLEEP } from "./config.ts";
+import { CommandError, type RunResult, printErr, run, sleep, stderrTail, writeText } from "./util.ts";
 
-export let ME = process.env.ME;
+let login = process.env.ME;
 
+// The user's GitHub login: ME, else asked of gh once. Child commands get it as ME.
 export function me(): string {
-  if (!ME) ME = strip(gh("api", "user", "--jq", ".login"));
-  ENV.ME = ME;
-  return ME;
+  if (!login) login = gh("api", "user", "--jq", ".login").trim();
+  ENV.ME = login;
+  return login;
 }
 
 // One gh call through the serializing shim. Backs off 1 to 5 minutes on
 // the secondary rate limit, like nodejs-review-queue's gh_retry, but keeps
 // stdout on failure (gh api graphql prints the response and exits 1 when it
 // has errors).
-export function ghRun(...args: string[]): Proc {
+function ghRun(...args: string[]): RunResult {
   for (let attempt = 1; ; attempt++) {
-    const p = run(["gh", ...args], { env: ENV });
-    if (p.returncode === 0 || !p.stderr.toLowerCase().includes("secondary rate limit") || attempt === 6) return p;
-    print(`  (gh backoff #${attempt}, sleeping ${fmt0(attempt * RETRY_SLEEP)}s)`, 2);
-    sleep(attempt * RETRY_SLEEP);
+    const r = run(["gh", ...args], { env: ENV });
+    if (r.status === 0 || !r.stderr.toLowerCase().includes("secondary rate limit") || attempt === 6) return r;
+    printErr(`  (gh backoff #${attempt}, sleeping ${Math.round(attempt * GH_RETRY_SLEEP)}s)`);
+    sleep(attempt * GH_RETRY_SLEEP);
   }
 }
 
+// gh's stdout. Throws CommandError when it fails.
 export function gh(...args: string[]): string {
-  const p = ghRun(...args);
-  if (p.returncode !== 0) throw new RuntimeError(`gh ${args.slice(0, 3).join(" ")}: ${cut(strip(p.stderr), -300)}`);
-  return p.stdout;
+  const r = ghRun(...args);
+  if (r.status !== 0) throw new CommandError(`gh ${args.slice(0, 3).join(" ")}: ${stderrTail(r)}`);
+  return r.stdout;
 }
 
-export function graphql(query: string): any {
-  const qf = P(CACHE, `query-${process.pid}.graphql`);
+// A GraphQL query's data.repository. The caller gives its shape. A deleted PR
+// comes back as a null alias plus a NOT_FOUND error, so callers treat a
+// missing or null alias as not found.
+export function graphql<T>(query: string): T {
+  const qf = path.join(CACHE, `query-${process.pid}.graphql`);
   writeText(qf, query);
-  let p: Proc;
+  let r: RunResult;
   try {
-    p = ghRun("api", "graphql", "-F", `query=@${qf}`);
+    r = ghRun("api", "graphql", "-F", `query=@${qf}`);
   } finally {
     fs.rmSync(qf, { force: true });
   }
-  let data: any;
+  let res: any;
   try {
-    data = JSON.parse(p.stdout);
+    res = JSON.parse(r.stdout);
   } catch {
-    throw new RuntimeError(`graphql: ${cut(strip(p.stderr), -300) || "no response"}`);
+    throw new CommandError(`graphql: ${stderrTail(r) || "no response"}`);
   }
-  // A deleted PR comes back as a null alias plus a NOT_FOUND error. Callers
-  // treat a missing alias as not found.
-  const errs = (data.errors || []).filter((e: any) => pget(e, "type") !== "NOT_FOUND");
-  if (errs.length || !truthy(data.data)) {
-    // A rate limit or server error has no "errors" list, only a
-    // top-level message (or nothing but stderr).
-    const why = (errs.length ? pget(errs[0], "message") : pget(data, "message")) || cut(strip(p.stderr), -200)
-      || `exit ${p.returncode}, no data`;
-    throw new RuntimeError(`graphql: ${why}`);
+  const errors: any[] = (res?.errors ?? []).filter((e: any) => e?.type !== "NOT_FOUND");
+  const data = res?.data;
+  if (errors.length || !data || Object.keys(data).length === 0) {
+    // A rate limit or server error has no "errors" list, only a top-level
+    // message (or nothing but stderr).
+    const why = (errors.length ? errors[0]?.message : res?.message) || stderrTail(r, 200) || `exit ${r.status}, no data`;
+    throw new CommandError(`graphql: ${why}`);
   }
-  return data.data.repository;
+  return data.repository;
 }

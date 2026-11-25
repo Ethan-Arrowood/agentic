@@ -1,7 +1,12 @@
+import { printErr } from "./util.ts";
+
+import { type RunResult } from "./util.ts";
+
 import { BANK, CLONE, ENV, MOVE, NC, SLOT_OWNERLESS_GRACE } from "./config.ts";
+import { P, TimeoutExpired, cut, dict, exists, isOSError, iso, item, now, nth, parseIso, partition, pget, py, sorted, splitlines, strip, truthy, unpack } from "./py.ts";
+import { die, print, readCacheJson, readText, run, writeText } from "./util.ts";
+
 import { Flock, SlotLock, running } from "./lock.ts";
-import { P, TimeoutExpired, cut, dict, isOSError, item, nth, partition, pget, py, sorted, splitlines, strip, truthy, unpack } from "./py.ts";
-import { type Proc, die, exists, iso, now, parseIso, print, readCacheJson, readText, run, writeText } from "./util.ts";
 
 export function slots(): string[][] {
   const conf = P(BANK, "slots.tsv");
@@ -14,7 +19,7 @@ export function slots(): string[][] {
 export function checkoutState(p: string): [boolean, string, string] {
   const st = run(["git", "-C", p, "status", "--porcelain"]);
   const at = strip(run(["git", "-C", p, "rev-parse", "--abbrev-ref", "HEAD"]).stdout);
-  return [st.returncode === 0, strip(st.stdout), at];
+  return [st.status === 0, strip(st.stdout), at];
 }
 
 // Image freshness. Slot builds start from the devcontainer image's prebuilt
@@ -25,14 +30,14 @@ export function checkoutState(p: string): [boolean, string, string] {
 
 // devc.sh image in a checkout, as a dict, or null when it fails.
 export function devcInfo(p: string): Record<string, string> | null {
-  let r: Proc;
+  let r: RunResult;
   try {
     r = run([P(NC, "devc.sh"), "image"], { cwd: p, env: ENV, timeout: 120 });
   } catch (err) {
     if (isOSError(err) || err instanceof TimeoutExpired) return null;
     throw err;
   }
-  if (r.returncode !== 0) return null;
+  if (r.status !== 0) return null;
   const d: Record<string, string> = dict();
   for (const l of splitlines(r.stdout)) {
     if (l.includes("=")) {
@@ -50,7 +55,7 @@ export function reclaimMoves(): string[] {
   using lock = new Flock("slots").enter();
   for (const [name] of slots()) {
     const h = new SlotLock(name).holder();
-    if (truthy(h) && pget(h, "owner") === MOVE && (now().t - parseIso(h.at)!.t) / 1000 > SLOT_OWNERLESS_GRACE) {
+    if (truthy(h) && pget(h, "owner") === MOVE && (now().t - parseIso(h!.at)!.t) / 1000 > SLOT_OWNERLESS_GRACE) {
       new SlotLock(name).release();
       out.push(`slot ${name}: its move worker is gone; released`);
     }
@@ -63,13 +68,13 @@ export type SlotRow = [string, string, any];
 // Commits on upstream/main, as last fetched, since commit, or ?.
 export function behindMain(commit: string | null): string {
   if (!/^[0-9a-f]{7,40}$/.test(commit || "")) return "?";
-  const p = run(["git", "-C", CLONE, "rev-list", "--count", `${commit}..refs/remotes/upstream/main`], { stderr: "devnull" });
-  return p.returncode === 0 ? strip(p.stdout) : "?";
+  const p = run(["git", "-C", CLONE, "rev-list", "--count", `${commit}..refs/remotes/upstream/main`], { stderr: "ignore" });
+  return p.status === 0 ? strip(p.stdout) : "?";
 }
 
 export function slotCmd(args: string[]): void {
   if (!args.length || args[0] === "status") {
-    const hub = readCacheJson("image-hub.json");
+    const hub = readCacheJson<any>("image-hub.json");
     if (pget(hub, "last_updated")) {
       print(`image: Docker Hub updated ${cut(hub.last_updated, 0, 16)} (checked ${py(pget(hub, "checked_at"))})`
         + (running("image-pull") ? ", pull running" : ""));
@@ -79,7 +84,7 @@ export function slotCmd(args: string[]): void {
       const [h, since] = [lock.holder(), lock.ownerlessSince()];
       const held = (truthy(h) && pget(h, "owner") === MOVE ? `moving to image ${py(pget(h, "to"))} since ${py(item(h, "at"))}` :
         truthy(h) ? `held for #${py(item(h, "pr"))} by ${py(item(h, "owner"))} since ${py(item(h, "at"))}` :
-        since ? `lock has no owner record since ${iso(since)} (reclaimed after ${SLOT_OWNERLESS_GRACE}s)`
+        since ? `lock has no owner record since ${iso({ t: since, off: 0 })} (reclaimed after ${SLOT_OWNERLESS_GRACE}s)`
         : "free");
       if (!exists(p)) {
         print(`slot ${name}: ${p} MISSING (${held})`);
@@ -121,15 +126,15 @@ export function slotCmd(args: string[]): void {
         if (!(want === "any" || want === name) || !exists(p)) continue;
         const [ok, dirty] = checkoutState(p);
         if (!ok || dirty) {
-          print(`slot ${name}: ${!ok ? "git status failed" : "dirty"}, skipped`, 2);
+          printErr(`slot ${name}: ${!ok ? "git status failed" : "dirty"}, skipped`);
           continue;
         }
         if (new SlotLock(name).acquire({ pr, owner, at: iso(now()) })) {
           print(`${name}\t${p}`);
           const i = info.get(name) || {};
           if (pget(i, "outdated") === "yes") {
-            print(`slot ${name}: its container is on image ${py(pget(i, "container_image"))}, older than the ` +
-              `local ${py(pget(i, "image_id"))}; a tick moves it once it's free`, 2);
+            printErr(`slot ${name}: its container is on image ${py(pget(i, "container_image"))}, older than the ` +
+              `local ${py(pget(i, "image_id"))}; a tick moves it once it's free`);
           }
           return;
         }
@@ -154,13 +159,13 @@ export function slotCmd(args: string[]): void {
       const h = new SlotLock(name).holder();
       // A repeated release (after a context reset, say) must not free a
       // slot another agent has since acquired.
-      if (truthy(h) && pr !== null && item(h, "pr") !== pr && !force) {
-        die(`slot ${name} is held for #${py(h.pr)} by ${py(item(h, "owner"))}, not #${pr}; not released`);
+      if (truthy(h) && pr !== null && item(h!, "pr") !== pr && !force) {
+        die(`slot ${name} is held for #${py(h!.pr)} by ${py(item(h, "owner"))}, not #${pr}; not released`);
       }
       new SlotLock(name).release();
     }
-    print(`slot ${name} released, at ${at}` + (at === "main" || at === "HEAD" ? "" : " (expected main)"));
+    printErr(`slot ${name} released, at ${at}` + (at === "main" || at === "HEAD" ? "" : " (expected main)"));
     return;
   }
-  die("usage: slot status | acquire <slot|any> <pr> [owner] | release <slot> <pr> | release <slot> --force", 2);
+  die("usage: slot status | acquire <slot|any> <pr> [owner] | release <slot> <pr> | release <slot> --force");
 }

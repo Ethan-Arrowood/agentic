@@ -1,10 +1,11 @@
-import { DEFER_DAYS, DOSSIER, REPO, TARGET } from "./config.ts";
+import { BANK_TARGET, DEFER_DAYS, DOSSIER, REPO } from "./config.ts";
+import { B, BOL, KeyError, P, ValueError, WS, add, cut, days, dict, isOSError, isValueError, iso, item, ljust, now, parseIso, partition, pget, py, pyInt, rstrip, sorted, splitWs, unset } from "./py.ts";
+import { die, print, readCacheJson, readText } from "./util.ts";
+
 import { type Conditions, type Entry, FIELDS, LANES, STATES, describeWait, entries, finish, load, rank, save, snoozed } from "./entry.ts";
 import { Flock, entryLock } from "./lock.ts";
-import { B, BOL, KeyError, P, ValueError, WS, add, cut, days, dict, isOSError, isValueError, item, ljust, partition, pget, py, pyInt, rstrip, sorted, splitWs, unset } from "./py.ts";
 import { rankedCandidates } from "./queue.ts";
 import { hold, screenConditions, wake } from "./sync.ts";
-import { die, iso, now, parseIso, print, readCacheJson, readText } from "./util.ts";
 
 export function show(e: Entry, headerOnly = false): void {
   const moved = [null, undefined, "-", e.head].includes(e.pr_head) ? "" : `, HEAD MOVED to ${e.pr_head.slice(0, 12)}`;
@@ -17,7 +18,7 @@ export function show(e: Entry, headerOnly = false): void {
   if (!headerOnly) print(rstrip(e.body!));
 }
 
-export function listCmd(showAll: boolean, target = TARGET): void {
+export function listCmd(showAll: boolean, target = BANK_TARGET): void {
   const es = sorted(entries(), (e) => [STATES.includes(e.state) ? STATES.indexOf(e.state) : 9, rank(e)]);
   const counts = STATES.map((s) => [s, es.filter((e) => e.state === s).length] as const);
   print("bank: " + (counts.filter(([, v]) => v).map(([k, v]) => `${v} ${k}`).join(", ") || "empty") + ` (target ${target})`);
@@ -148,7 +149,7 @@ export function heldEntry(n: string): Entry {
 // The PR author's login from the entry, else the candidate metadata, or null.
 export function authorOf(e: Entry): string | null {
   if (![null, undefined, "-", "", "ghost"].includes(e.author)) return e.author;
-  const meta = pget(readCacheJson("candidates.json"), String(e.pr)) || {};
+  const meta = pget(readCacheJson<any>("candidates.json"), String(e.pr)) || {};
   return ![null, undefined, "ghost"].includes(pget(meta, "author")) ? meta.author : null;
 }
 

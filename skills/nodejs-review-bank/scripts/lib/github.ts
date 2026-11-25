@@ -33,6 +33,12 @@ export function gh(...args: string[]): string {
   return r.stdout;
 }
 
+type GraphqlResponse = {
+  data?: { repository?: unknown } | null;
+  errors?: ({ type?: string; message?: string } | null)[];
+  message?: string; // a rate limit or server error
+};
+
 // A GraphQL query's data.repository. The caller gives its shape. A deleted PR
 // comes back as a null alias plus a NOT_FOUND error, so callers treat a
 // missing or null alias as not found.
@@ -45,13 +51,13 @@ export function graphql<T>(query: string): T {
   } finally {
     fs.rmSync(qf, { force: true });
   }
-  let res: any;
+  let res: GraphqlResponse | null;
   try {
     res = JSON.parse(r.stdout);
   } catch {
     throw new CommandError(`graphql: ${stderrTail(r) || "no response"}`);
   }
-  const errors: any[] = (res?.errors ?? []).filter((e: any) => e?.type !== "NOT_FOUND");
+  const errors = (res?.errors ?? []).filter((e) => e?.type !== "NOT_FOUND");
   const data = res?.data;
   if (errors.length || !data || Object.keys(data).length === 0) {
     // A rate limit or server error has no "errors" list, only a top-level
@@ -59,5 +65,5 @@ export function graphql<T>(query: string): T {
     const why = (errors.length ? errors[0]?.message : res?.message) || stderrTail(r, 200) || `exit ${r.status}, no data`;
     throw new CommandError(`graphql: ${why}`);
   }
-  return data.repository;
+  return data.repository as T;
 }

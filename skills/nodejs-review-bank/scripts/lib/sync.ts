@@ -1,39 +1,64 @@
-import { LEASE_MINUTES, NAME, OWNER, SCREEN_HOURS } from "./config.ts";
-import { BOL, type Dt, WS, add, cmp, cut, hours, iso, maxDt, now, parseIso, pct, pget, pyInt, sorted, startsWithAny, truthy } from "./py.ts";
-import { readTsv } from "./util.ts";
-
-import { type Conditions, type Entry, LANE_OF_BUCKET, describeWait, dropInputs, entries, finish, load, save, wakeConditions } from "./entry.ts";
+// sync: read open entries back from GitHub. Records the user's actions,
+// prunes landed, closed, and draft PRs, wakes holds, and marks stale reviews.
+import { LEASE_MINUTES, NAME, OWNER } from "./config.ts";
+import { type Entry, LANE_OF_BUCKET, entries, finish, load, save } from "./entry.ts";
 import { graphql, me } from "./github.ts";
+import { type WaitFor, describeWait, hold, screenConditions, wake, wakeConditions } from "./holds.ts";
 import { entryLock } from "./lock.ts";
 import { ciAt, landingAt, readCi } from "./queue.ts";
 import { closeBody } from "./screen.ts";
+import { MINUTE, iso, now, parseIso, readTsv } from "./util.ts";
 
-export const SYNC_FIELDS = (
-  "number title state isDraft createdAt updatedAt closedAt headRefOid author{login} " +
-  "labels(first:50){nodes{name}} " +
-  "allReviews: reviews(last:50){nodes{author{login} submittedAt}} " +
-  'reviews(last:30,author:"%s"){nodes{state submittedAt commit{oid}}} ' +
-  "comments(last:30){nodes{author{__typename login} createdAt body}} " +
-  "timelineItems(last:50,itemTypes:[LABELED_EVENT,UNLABELED_EVENT]){nodes{__typename " +
-  "...on LabeledEvent{createdAt actor{login} label{name}} " +
-  "...on UnlabeledEvent{createdAt actor{login} label{name}}}}");
-export const LANDED = new RegExp(`${BOL}[${WS}]*Landed in ([0-9a-f]{7,40})`);
+type Login = { login: string } | null;
 
+// One PR as the sync query returns it.
+type SyncNode = {
+  number: number;
+  title: string;
+  state: string;
+  isDraft: boolean;
+  createdAt?: string;
+  updatedAt: string;
+  closedAt: string | null;
+  headRefOid: string;
+  author: Login;
+  labels: { nodes: { name: string }[] };
+  allReviews?: { nodes: { author: Login; submittedAt: string | null }[] };
+  reviews: { nodes: { state: string; submittedAt: string | null; commit: { oid: string } | null }[] };
+  comments: { nodes: { author: Login; createdAt: string; body: string | null }[] };
+  timelineItems: { nodes: { __typename: string; createdAt: string; actor: Login; label: { name: string } }[] };
+};
+
+// `reviews` are mine only.
+function syncFields(login: string): string {
+  return "number title state isDraft createdAt updatedAt closedAt headRefOid author{login} " +
+    "labels(first:50){nodes{name}} " +
+    "allReviews: reviews(last:50){nodes{author{login} submittedAt}} " +
+    `reviews(last:30,author:"${login}"){nodes{state submittedAt commit{oid}}} ` +
+    "comments(last:30){nodes{author{__typename login} createdAt body}} " +
+    "timelineItems(last:50,itemTypes:[LABELED_EVENT,UNLABELED_EVENT]){nodes{__typename " +
+    "...on LabeledEvent{createdAt actor{login} label{name}} " +
+    "...on UnlabeledEvent{createdAt actor{login} label{name}}}}";
+}
+
+// nodejs lands with commit-queue or git node land, so a landed PR shows as
+// closed with a "Landed in <sha>" comment.
+const LANDED = /^\s*Landed in ([0-9a-f]{7,40})/m;
+
+// Sync the open entries, or only those in `only`. Returns report lines.
 export function sync(only: Set<string> | null = null): string[] {
-  const heads = new Map(entries().filter((e) => e.state !== "done" && (!only || only.has(e.pr)))
-    .map((e) => [e.pr, e.head] as const));
-  const nums = [...heads.keys()];
-  if (!nums.length) return ["sync: no open entries"];
-  const rr = new Map(readTsv("rereview.tsv").map((r) => [r[1], r] as const));
-  const data = new Map<string, any>();
-  for (let i = 0; i < nums.length; i += 20) {
-    const fields = nums.slice(i, i + 20).map((n) => `p${n}: pullRequest(number:${n}){${pct(SYNC_FIELDS, me())}}`).join(" ");
-    for (const d of Object.values<any>(graphql<any>(`query{repository(owner:"${OWNER}",name:"${NAME}"){${fields}}}`))) {
-      if (truthy(d)) data.set(String(d.number), d);
-    }
+  const heads = new Map(entries().filter((e) => e.state !== "done" && (!only || only.has(e.pr))).map((e) => [e.pr, e.head]));
+  const prs = [...heads.keys()];
+  if (!prs.length) return ["sync: no open entries"];
+  const rereview = new Map(readTsv("rereview.tsv").map((r) => [r[1], r]));
+  const data = new Map<string, SyncNode>();
+  for (let i = 0; i < prs.length; i += 20) {
+    const fields = prs.slice(i, i + 20).map((n) => `p${n}: pullRequest(number:${n}){${syncFields(me())}}`).join(" ");
+    const repo = graphql<Record<string, SyncNode | null>>(`query{repository(owner:"${OWNER}",name:"${NAME}"){${fields}}}`);
+    for (const d of Object.values(repo)) if (d) data.set(String(d.number), d);
   }
   const log: string[] = [];
-  for (const n of nums) {
+  for (const n of prs) {
     // Re-read under the entry's lock: a put, present, or set may have
     // changed it while the query above waited on GitHub.
     using lock = entryLock(n).enter();
@@ -44,29 +69,27 @@ export function sync(only: Set<string> | null = null): string[] {
       log.push(`  ${n}: re-prepared during sync, skipped until the next one`);
       continue;
     }
-    log.push(...syncEntry(e, data.get(n), rr));
+    log.push(...syncEntry(e, data.get(n) ?? null, rereview));
   }
   return log.length ? log : ["sync: no changes"];
 }
 
-export function syncEntry(e: Entry, d: any, rr: Map<string, string[]>): string[] {
+function syncEntry(e: Entry, d: SyncNode | null, rereview: Map<string, string[]>): string[] {
   const n = e.pr;
-  if (!truthy(d)) {
+  if (!d) {
     finish(e, "not-found");
     return [`  ${n}: not found on GitHub (deleted?)`];
   }
-  [e.title, e.updated_at, e.pr_head] = [d.title, d.updatedAt, d.headRefOid];
-  const author = pget(d.author || {}, "login");
+  Object.assign(e, { title: d.title, updated_at: d.updatedAt, pr_head: d.headRefOid });
+  const author = d.author?.login ?? null;
   if (author === me()) {
     finish(e, "mine");
     return [`  ${n}: authored by me, dropped`];
   }
   if (d.state === "MERGED" || d.state === "CLOSED") {
-    // nodejs lands with commit-queue or git node land, so a landed PR
-    // shows as closed with a "Landed in <sha>" comment.
-    const landed = d.comments.nodes.map((c: any) => LANDED.exec(c.body || "")).filter(Boolean).map((m: RegExpExecArray) => m[1]);
+    const landed = d.comments.nodes.flatMap((c) => LANDED.exec(c.body || "")?.[1] ?? []);
     const disp = landed.length ? `landed ${landed.at(-1)}` : d.state.toLowerCase();
-    finish(e, disp, pget(d, "closedAt"));
+    finish(e, disp, d.closedAt);
     return [`  ${n}: ${disp}`];
   }
   if (d.isDraft) {
@@ -76,7 +99,7 @@ export function syncEntry(e: Entry, d: any, rr: Map<string, string[]>): string[]
   if (e.state === "waiting") {
     // My own actions don't wake a hold; it waits on others and on time.
     const why = wakeReasons(e, d);
-    if (why.length && "screen" in wakeConditions(e) && !why.some((w) => w.startsWith("author responded"))) {
+    if (why.length && wakeConditions(e).screen !== undefined && !why.some((w) => w.startsWith("author responded"))) {
       // The author didn't respond in time: back to the user, with a
       // recommendation to close it, not into a lane for a review.
       Object.assign(e, {
@@ -96,45 +119,45 @@ export function syncEntry(e: Entry, d: any, rr: Map<string, string[]>): string[]
   let since = parseIso(e.created_at) ?? now();
   if (e.lane === "screen") {
     // A close recommendation reuses the entry: only actions after it count.
-    since = maxDt(since, parseIso(e.prepared_at) ?? since);
+    since = Math.max(since, parseIso(e.prepared_at) ?? since);
   }
   const acted = myActions(d, since);
-  const labels = new Set<string>(d.labels.nodes.map((l: any) => l.name));
-  if (acted && e.lane === "screen" && !startsWithAny(acted[0], ["approved", "changes-requested"])) {
+  if (acted && e.lane === "screen" && !acted.disposition.startsWith("approved") &&
+    !acted.disposition.startsWith("changes-requested")) {
     // The user handled a screened PR (a comment asking for the policy):
     // wait for the author. A review means they chose to review it after all.
-    const [disp, when] = acted;
-    [e.disposition, e.disposition_at] = [disp, when];
-    hold(e, screenConditions(e, author, d.headRefOid, when), when, "screen: waiting for the author");
-    return [`  ${n}: ${disp}, waiting ${describeWait(e)}`];
+    Object.assign(e, { disposition: acted.disposition, disposition_at: acted.at });
+    hold(e, screenConditions(e, author, d.headRefOid, acted.at), acted.at, "screen: waiting for the author");
+    return [`  ${n}: ${acted.disposition}, waiting ${describeWait(e)}`];
   }
   if (acted) {
-    const [disp, when, reviewed] = acted;
+    const { disposition, at, reviewed } = acted;
     e.acted_head = reviewed || e.head;
     // An approval at the head leaves nothing to do until the PR can land.
-    const gates = disp.startsWith("approved") && reviewed === d.headRefOid ? landingGates(d, n) : {};
-    if (truthy(gates)) {
-      [e.disposition, e.disposition_at] = [disp, when];
-      hold(e, { reviews: "1", push: reviewed!.slice(0, 12), ...gates }, when, "approved; waiting until it can land");
-      return [`  ${n}: ${disp}, waiting ${describeWait(e)}`];
+    const gates = disposition.startsWith("approved") && reviewed === d.headRefOid ? landingGates(d, n) : {};
+    if (Object.keys(gates).length) {
+      Object.assign(e, { disposition, disposition_at: at });
+      hold(e, { reviews: "1", push: reviewed!.slice(0, 12), ...gates }, at, "approved; waiting until it can land");
+      return [`  ${n}: ${disposition}, waiting ${describeWait(e)}`];
     }
-    finish(e, disp, when);
-    return [`  ${n}: ${disp}`];
+    finish(e, disposition, at);
+    return [`  ${n}: ${disposition}`];
   }
   // Exact label: commit-queue-squash, -rebase, and -failed don't enqueue.
-  if (e.lane === "cq" && labels.has("commit-queue")) {
+  if (e.lane === "cq" && d.labels.nodes.some((l) => l.name === "commit-queue")) {
     finish(e, "cq-labeled");
     return [`  ${n}: commit-queue added by someone else`];
   }
   // The lane changes only for an entry still open. A finished entry keeps
   // the lane it was prepared in, which plan compares with the candidate's.
-  if (rr.has(n) && Object.hasOwn(LANE_OF_BUCKET, rr.get(n)![0])) e.lane = LANE_OF_BUCKET[rr.get(n)![0]];
+  const lane = LANE_OF_BUCKET.get(rereview.get(n)?.[0] ?? "");
+  if (lane) e.lane = lane;
   const log: string[] = [];
   if (["ready", "needs-run", "presented"].includes(e.state) && e.head !== d.headRefOid) {
     e.note = `head moved from ${e.head.slice(0, 12)} while ${e.state}`;
     e.state = "stale";
     log.push(`  ${n}: stale, ${e.note}`);
-  } else if (e.state === "preparing" && (now().t - (parseIso(e.lease) ?? now()).t) / 1000 > LEASE_MINUTES * 60) {
+  } else if (e.state === "preparing" && now() - (parseIso(e.lease) ?? now()) > LEASE_MINUTES * MINUTE) {
     e.state = "stale";
     e.note = "preparation abandoned (lease expired)";
     log.push(`  ${n}: ${e.note}`);
@@ -143,101 +166,77 @@ export function syncEntry(e: Entry, d: any, rr: Map<string, string[]>): string[]
   return log;
 }
 
-// My reviews, label changes, and comments since `since`, as one
-// disposition string, the time of the latest, and the commit of my latest
-// review (or null).
-export function myActions(d: any, since: Dt): [string, string, string | null] | null {
-  const acts: [Dt, string][] = [];
+// My reviews, label changes, and comments after `since`: one disposition
+// string, the time of the latest, and the commit of my latest review (or null).
+function myActions(d: SyncNode, since: number): { disposition: string; at: string; reviewed: string | null } | null {
+  const acts: { at: number; what: string }[] = [];
   let reviewed: string | null = null;
   for (const r of d.reviews.nodes) {
     const t = parseIso(r.submittedAt);
-    if (t && t.t > since.t) {
-      const oid = pget(r.commit || {}, "oid");
+    if (t !== null && t > since) {
+      const oid = r.commit?.oid ?? null;
       reviewed = oid || reviewed;
-      acts.push([t, `${r.state.toLowerCase().replaceAll("_", "-")} @${cut(oid || "?", 0, 12)}`]);
+      acts.push({ at: t, what: `${r.state.toLowerCase().replaceAll("_", "-")} @${(oid || "?").slice(0, 12)}` });
     }
   }
   for (const ev of d.timelineItems.nodes) {
-    if (pget(ev.actor || {}, "login") === me() && parseIso(ev.createdAt)!.t > since.t) {
-      const verb = ev.__typename === "LabeledEvent" ? "labeled" : "unlabeled";
-      acts.push([parseIso(ev.createdAt)!, `${verb} ${ev.label.name}`]);
+    const t = parseIso(ev.createdAt);
+    if (ev.actor?.login === me() && t !== null && t > since) {
+      acts.push({ at: t, what: `${ev.__typename === "LabeledEvent" ? "labeled" : "unlabeled"} ${ev.label.name}` });
     }
   }
   for (const c of d.comments.nodes) {
-    if (pget(c.author || {}, "login") === me() && parseIso(c.createdAt)!.t > since.t) {
-      acts.push([parseIso(c.createdAt)!, "commented"]);
-    }
+    const t = parseIso(c.createdAt);
+    if (c.author?.login === me() && t !== null && t > since) acts.push({ at: t, what: "commented" });
   }
   if (!acts.length) return null;
-  acts.sort((a, b) => a[0].t - b[0].t || cmp(a[1], b[1]));
+  acts.sort((a, b) => a.at - b.at || (a.what < b.what ? -1 : a.what > b.what ? 1 : 0));
   // Lead with the review, if any: "approved @<sha>; labeled request-ci".
-  const order = sorted(acts, (a) => !a[1].includes(" @"));
-  return [[...new Set(order.map((a) => a[1]))].join("; "), iso(acts.at(-1)![0]), reviewed];
-}
-
-// Wake conditions for a screened PR: the author comments or pushes, or
-// SCREEN_HOURS pass.
-export function screenConditions(e: Entry, author: string | null, head: string | null, since: string): Conditions {
-  const until = add(parseIso(since) ?? now(), hours(SCREEN_HOURS));
-  return {
-    author: author || pget(e, "author") || "", push: (head || pget(e, "pr_head") || e.head).slice(0, 12),
-    until: iso(until), screen: "",
-  };
-}
-
-// Move an entry to waiting and drop its inputs: on wake it is planned
-// again, and others' reviews or a push make the old review stale anyway.
-export function hold(e: Entry, conditions: Conditions, since: string, note: string): void {
-  [e.state, e.wait_since, e.note, e.lease] = ["waiting", since, note, "-"];
-  e.wait_for = Object.entries(conditions).map(([k, v]) => (v ? `${k}=${v}` : k)).join(",") || "-";
-  save(e);
-  dropInputs(e.pr);
-}
-
-// End a hold. The entry is done, so plan puts the PR back in its lane.
-export function wake(e: Entry, why: string[]): void {
-  [e.state, e.note] = ["done", "woke: " + why.join("; ")];
-  save(e);
+  const isReview = (a: { what: string }) => a.what.includes(" @");
+  const order = [...acts.filter(isReview), ...acts.filter((a) => !isReview(a))];
+  return { disposition: [...new Set(order.map((a) => a.what))].join("; "), at: iso(acts.at(-1)!.at), reviewed };
 }
 
 // The landing gates still closed at the PR's head, as wake conditions:
 // the landing wait, and green CI from the cq CI cache.
-export function landingGates(d: any, n: string): Conditions {
-  const gates: Conditions = {};
-  const at = landingAt(pget(d, "createdAt"), d.labels.nodes.map((l: any) => l.name));
-  if (at && at.t > now().t) gates.landing = iso(at);
-  const r = pget(readCi(), n);
-  if (!(ciAt(r, d.headRefOid) && truthy(r.ok))) gates.ci = "";
+function landingGates(d: SyncNode, pr: string): WaitFor {
+  const gates: WaitFor = {};
+  const at = landingAt(d.createdAt, d.labels.nodes.map((l) => l.name));
+  if (at !== null && at > now()) gates.landing = iso(at);
+  const r = readCi()[pr];
+  if (!(ciAt(r, d.headRefOid) && r.ok)) gates.ci = "";
   return gates;
 }
 
 // Which of a waiting entry's wake conditions have happened.
-export function wakeReasons(e: Entry, d: any): string[] {
-  const w = wakeConditions(e), why: string[] = [], head: string = d.headRefOid;
+function wakeReasons(e: Entry, d: SyncNode): string[] {
+  const w = wakeConditions(e), why: string[] = [], head = d.headRefOid;
+  const screen = w.screen !== undefined;
   const since = parseIso(e.wait_since) ?? now();
-  if (w.push && !head.startsWith(w.push)) why.push(("screen" in w ? "author responded: " : "") + `new push ${head.slice(0, 12)}`);
-  if (w.author && (pget(d.comments || {}, "nodes", []) as any[]).some((c) => pget(c.author || {}, "login") === w.author
-      && (parseIso(pget(c, "createdAt")) ?? since).t > since.t)) {
+  if (w.push && !head.startsWith(w.push)) why.push(`${screen ? "author responded: " : ""}new push ${head.slice(0, 12)}`);
+  const byAuthor = (c: SyncNode["comments"]["nodes"][number]) =>
+    c.author?.login === w.author && (parseIso(c.createdAt) ?? since) > since;
+  if (w.author && (d.comments?.nodes ?? []).some(byAuthor)) {
     // "author responded" marks a screen hold's wake: prefetch then skips the screen.
-    why.push("screen" in w ? `author responded: comment by @${w.author}` : `comment by the author @${w.author}`);
+    why.push(screen ? `author responded: comment by @${w.author}` : `comment by the author @${w.author}`);
   }
-  if ("reviews" in w) {
+  if (w.reviews !== undefined) {
     // Distinct reviewers other than me and the author, any review state.
-    const who = new Set((pget(d.allReviews || {}, "nodes", []) as any[])
-      .filter((r) => (parseIso(pget(r, "submittedAt")) ?? since).t > since.t)
-      .map((r) => pget(r.author || {}, "login")));
-    for (const x of [me(), pget(d.author || {}, "login"), null]) who.delete(x);
-    if (who.size >= pyInt(w.reviews || 1)) why.push(`reviewed by ${sorted(who).join(", ")}`);
+    const who = new Set((d.allReviews?.nodes ?? [])
+      .filter((r) => (parseIso(r.submittedAt) ?? since) > since)
+      .map((r) => r.author?.login ?? null));
+    for (const x of [me(), d.author?.login ?? null, null]) who.delete(x);
+    if (who.size >= Number(w.reviews || 1)) why.push(`reviewed by ${[...who].sort().join(", ")}`);
   }
-  if ("landing" in w) {
+  if (w.landing !== undefined) {
     // Recomputed each sync: a fast-track label can end it early.
-    const at = landingAt(pget(d, "createdAt"), d.labels.nodes.map((l: any) => l.name));
-    if (at && at.t <= now().t) why.push("landing wait over");
+    const at = landingAt(d.createdAt, d.labels.nodes.map((l) => l.name));
+    if (at !== null && at <= now()) why.push("landing wait over");
   }
-  if ("ci" in w) {
-    const r = pget(readCi(), e.pr);
-    if (ciAt(r, head) && truthy(r.ok)) why.push(`CI green at ${head.slice(0, 12)}`);
+  if (w.ci !== undefined) {
+    const r = readCi()[e.pr];
+    if (ciAt(r, head) && r.ok) why.push(`CI green at ${head.slice(0, 12)}`);
   }
-  if (w.until && parseIso(w.until)!.t <= now().t) why.push(`hold until ${w.until} passed`);
+  if (w.until && parseIso(w.until)! <= now()) why.push(`hold until ${w.until} passed`);
   return why;
 }

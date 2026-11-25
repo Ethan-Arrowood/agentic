@@ -5,10 +5,10 @@ import { OSError, P, RuntimeError, TimeoutExpired, WS, cut, dict, dumps, exists,
 import { die, git, isDir, print, readText, removeTree, run, writeAtomic, writeText } from "./util.ts";
 
 import fs from "node:fs";
-import { type Candidate, type Entry, entryPath, finish, load, save } from "./entry.ts";
+import { type Entry, entryPath, finish, load, newEntry, save } from "./entry.ts";
 import { gh, graphql } from "./github.ts";
 import { entryLock, unlock, zshFlock } from "./lock.ts";
-import { rankedCandidates } from "./queue.ts";
+import { type Candidate, rankedCandidates } from "./queue.ts";
 import { screen, screenBody, screenLine } from "./screen.ts";
 
 // Finish the entry for a PR prefetch won't prepare, creating one if
@@ -16,8 +16,8 @@ import { screen, screenBody, screenLine } from "./screen.ts";
 // an older cached candidate.
 export function refused(n: string, info: any, disp: string): void {
   using lock = entryLock(n).enter();
-  const e: Entry = load(n) ?? dict({
-    pr: n, url: `https://github.com/${REPO}/pull/${n}`, lane: "fresh",
+  const e: Entry = load(n) ?? newEntry(n, {
+    url: `https://github.com/${REPO}/pull/${n}`, lane: "fresh",
     head: info.headRefOid || "-", created_at: iso(now()), disposition: "-",
   });
   e.title = info.title || e.title || "-";
@@ -123,7 +123,7 @@ export function swapIn(n: string, newDir: string, tmpRef: string, pr: string, in
       writeText(P(ARCHIVE, `${n}-${pget(e, "head", "-").slice(0, 12)}.md`), readText(entryPath(n)));
     }
     if (!e || ["done", "stale", "waiting"].includes(e.state)) {
-      e = dict({ pr: n, created_at: iso(now()), disposition: "-", my_teams: pget(e || {}, "my_teams") });
+      e = newEntry(n, { created_at: iso(now()), disposition: "-", my_teams: e?.my_teams ?? "-" });
     }
     Object.assign(e!, {
       url: `https://github.com/${REPO}/pull/${n}`, title: info.title,

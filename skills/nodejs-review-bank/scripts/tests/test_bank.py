@@ -11,7 +11,10 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 SCRIPTS = HERE.parent
-BANK_PY = SCRIPTS / "bank.py"
+# The command under test. BANK_CMD swaps in another implementation, such as
+# the TypeScript port: BANK_CMD="node bank.ts". Paths resolve from scripts/.
+BANK_CMD = (os.environ["BANK_CMD"].split() if os.environ.get("BANK_CMD") else [sys.executable, "bank.py"])
+BANK_CMD = [str(SCRIPTS / a) if (SCRIPTS / a).is_file() else a for a in BANK_CMD]
 RQ_REAL = (SCRIPTS / "../../nodejs-review-queue/scripts").resolve()
 NC_REAL = (SCRIPTS / "../../nodejs-contribute/scripts").resolve()
 FIELDS = ["pr", "url", "title", "author", "lane", "state", "head", "pr_head", "acted_head", "created_at",
@@ -96,7 +99,7 @@ class BankTest(unittest.TestCase):
         return [json.loads(l) for l in p.read_text().splitlines()] if p.exists() else []
 
     def run_bank(self, *args, check=True, timeout=60, env=None):
-        p = subprocess.run([sys.executable, str(BANK_PY), *args], env=env or self.env, text=True,
+        p = subprocess.run([*BANK_CMD, *args], env=env or self.env, text=True,
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
         if check and p.returncode != 0:
             self.fail(f"bank.py {' '.join(args)} exited {p.returncode}\n{p.stdout}\n{p.stderr}")
@@ -133,7 +136,7 @@ class BankTest(unittest.TestCase):
         self.write_entry(5, state="preparing", lease=ago(minutes=5))
         gate = self.tmp / "gate"
         self.rules([self.sync_rule(pr_node(5, A), wait_file=str(gate))])
-        sync = subprocess.Popen([sys.executable, str(BANK_PY), "sync"], env=self.env, text=True,
+        sync = subprocess.Popen([*BANK_CMD, "sync"], env=self.env, text=True,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         for _ in range(200):
             if Path(str(gate) + ".reached").exists():
@@ -602,7 +605,7 @@ class BankTest(unittest.TestCase):
         fd = os.open(self.bank / "locks" / "entry-5.lock", os.O_CREAT | os.O_RDWR)
         fcntl.flock(fd, fcntl.LOCK_EX)
         try:
-            pres = subprocess.Popen([sys.executable, str(BANK_PY), "present"], env=self.env, text=True,
+            pres = subprocess.Popen([*BANK_CMD, "present"], env=self.env, text=True,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             time.sleep(1.5)
             self.write_entry(5, state="done", disposition="skipped", disposition_at=ago(minutes=0))
@@ -645,7 +648,7 @@ class BankTest(unittest.TestCase):
         self.write_entry(5, state="preparing", head=A, pr_head=A, lease=ago(minutes=5))
         gate = self.tmp / "gate"
         self.rules([self.sync_rule(pr_node(5, A), wait_file=str(gate))])
-        sync = subprocess.Popen([sys.executable, str(BANK_PY), "sync"], env=self.env, text=True,
+        sync = subprocess.Popen([*BANK_CMD, "sync"], env=self.env, text=True,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         for _ in range(200):
             if Path(str(gate) + ".reached").exists():
@@ -1105,15 +1108,20 @@ class BankTest(unittest.TestCase):
         self.assertIn("PREPARE 5 lane=cq", self.run_bank("plan").stdout)
 
     def test_the_landing_wait_is_72_hours_over_a_weekend(self):
-        code = ("import bank\n"
-                "for t in ('2026-11-16T12:00:00Z', '2026-11-19T12:00:00Z', '2026-11-22T12:00:00Z'):\n"
-                "    print(bank.iso(bank.landing_at(t, [])))\n"
-                "print(bank.iso(bank.landing_at('2026-11-19T12:00:00Z', ['fast-track'])))\n")
-        p = subprocess.run([sys.executable, "-c", code], cwd=SCRIPTS, env=dict(self.env, PYTHONDONTWRITEBYTECODE="1"), text=True,
-                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertEqual(p.stdout.split(), ["2026-11-18T12:00:00Z", "2026-11-22T12:00:00Z",
-                                            "2026-11-25T12:00:00Z", "2026-11-19T12:00:00Z"])
+        # Opened next week, so every landing time is still in the future.
+        green = json.dumps({"5": {"head": A[:12], "ok": True, "line": "CI=SUCCESS HEAD-MATCH", "at": ago(minutes=1)}})
+        self.cache("ci.json", green)
+        monday = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
+        monday += timedelta(days=7 - monday.weekday())
+        for opened, landing in ((0, 2), (3, 6), (6, 9)):  # Mon to Wed, Thu to Sun, Sun to Wed
+            row = self.rereview_row(5).rstrip("\n") + f"\t{iso(monday + timedelta(days=opened))}\thttp\n"
+            self.cache("rereview.tsv", row)
+            self.assertIn(f"SKIP 5 lane=cq landing wait until {iso(monday + timedelta(days=landing))}",
+                          self.run_bank("plan", "--all").stdout)
+        # fast-track has no wait: it can land once it's open.
+        self.cache("rereview.tsv", self.rereview_row(5).rstrip("\n") + f"\t{iso(monday + timedelta(days=3))}\tfast-track\n")
+        self.assertIn(f"SKIP 5 lane=cq landing wait until {iso(monday + timedelta(days=3))}",
+                      self.run_bank("plan", "--all").stdout)
 
 
     # The automation screen.

@@ -85,6 +85,8 @@ Every always-loaded rule costs context in every session, and longer instruction 
 
 Every hook fast-forwards this clone (`git pull --ff-only`), only installs into directories that already exist, never overwrites anything it didn't create, stays silent on a no-op, and always exits 0. A rule pulled at session start loads in the next session, so updates reach a machine one session late. The hooks only pull; push from the machine where you edit.
 
+Claude Code mods live in [`agents/claude/mods/`](agents/claude/mods/), since they're Claude Code plugins. [`highkeep`](agents/claude/mods/highkeep/) is my look for the desktop and mobile apps: a castle in the mountains that follows the seasons, with plan usage drawn into the scene.
+
 To add an agent, create `agents/<agent>/sync.sh` and a README covering where that agent reads global instructions and skills.
 
 My [dotfiles](https://github.com/Ethan-Arrowood/dotfiles) do the install with `repo Ethan-Arrowood/agentic` (skills), `rules Ethan-Arrowood/agentic` (rules), and `hook <agent> Ethan-Arrowood/agentic#agents/<agent>/sync.sh SessionStart` (hooks) lines in a Skillfile.

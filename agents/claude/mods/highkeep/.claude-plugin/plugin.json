@@ -1,0 +1,10 @@
+{
+  "name": "highkeep",
+  "version": "0.1.0",
+  "description": "Alpine twilight look: snow-capped peaks, spruce and aspen, and a meadow through the seasons, with plan usage drawn into the scene",
+  "types": "./types/index.d.ts",
+  "license": "MIT",
+  "author": {
+    "name": "Ethan Arrowood"
+  }
+}

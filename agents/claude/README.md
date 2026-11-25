@@ -86,6 +86,14 @@ fi
 
 Each container clones the latest `main`, so rule changes reach the next cloud session without a pull. A failed clone prints a note and the session starts without the rules. Repos are cloned to `/home/user/<repo>`, not `~/dev/<org>/<repo>`, so org rules don't load. *Cloud sessions* in [`git.md`](../../rules/git.md#cloud-sessions) covers how the rules change there.
 
+## Mods
+
+[`mods/`](mods/) holds Claude Code mods: plugins of function hooks that change Claude Code's own interface. `sync.sh` doesn't install them. Load one for a session with `claude --plugin-dir agents/claude/mods/<mod>`, or name its absolute path in `CLAUDE_CODE_PLUGIN_DIRS` in the `env` block of `~/.claude/settings.json` so desktop sessions load it too.
+
+| Mod | What it does |
+|-----|--------------|
+| [`highkeep`](mods/highkeep/) | Dark look with an animated castle-in-the-mountains backdrop that follows the seasons. The moon wanes with the seven-day limit and a candle burns down with the five-hour one. Shows a compact review row when review-monitor (Harper's cross-model review pane) runs a cross-model review. |
+
 ## Permissions for the Node.js skills
 
 A skill can't grant tool approval, so the `nodejs-contribute`, `nodejs-review-queue`, and `nodejs-review-bank` scripts prompt on every run until you allow them. Add these once to `~/dev/nodejs/node/.claude/settings.local.json`, which is git-ignored. Merge with what's there; don't replace it.

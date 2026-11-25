@@ -1,7 +1,7 @@
 {
   "name": "highkeep",
   "version": "0.1.0",
-  "description": "Dark fantasy look: a castle in the mountains through the seasons, with plan usage drawn into the scene",
+  "description": "Alpine twilight look: snow-capped peaks, spruce and aspen, and a meadow through the seasons, with plan usage drawn into the scene",
   "types": "./types/index.d.ts",
   "license": "MIT",
   "author": {

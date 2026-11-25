@@ -6,27 +6,27 @@ import { makeColors } from './make-colors.js'
 import type { ReviewLeg, ReviewRun } from './review-monitor'
 import { scene, tintOf } from './scene'
 
-const SCENE = 'highkeep-castle'
+const SCENE = 'highkeep-peaks'
 const STORE_KEY = 'reading'
 
 const reading = atom({ plugin: 'highkeep', key: 'reading' } as const, null as HighkeepReading | null)
 const reviews = { plugin: 'review-monitor', key: 'runs' } as const
 
-// Lamp-lit stone under a dusk sky: warm grays, ember accent.
+// Alpine twilight: cool slate grays, an alpenglow accent.
 const { theme, problems } = makeColors({
   label: 'Highkeep',
   only: 'dark',
-  roles: { accent: '#c8833a', danger: '#b8433a', success: '#88a463', warning: '#d6a23e', pro: '#9581bd' },
+  roles: { accent: '#e08e6d', danger: '#c4473c', success: '#6fa36a', warning: '#d9a441', pro: '#8f86c9' },
   dark: {
     gray: {
       anchors: {
-        'surface-0': '#15131a',
-        'surface-1': '#1b1820',
-        'surface-2': '#211d26',
-        'surface-3': '#241f29',
-        'text-primary': '#ece4d8',
-        'text-secondary': '#c9bfb2',
-        'text-muted': '#a39a8f',
+        'surface-0': '#10151e',
+        'surface-1': '#151b26',
+        'surface-2': '#1a212d',
+        'surface-3': '#1d2530',
+        'text-primary': '#e6ebf2',
+        'text-secondary': '#c2cad6',
+        'text-muted': '#9aa4b2',
       },
     },
   },
@@ -38,7 +38,7 @@ export const unpainted = problems.find(line => line.startsWith("Desktop won't pa
 const LOOK: ThemeSetArgs = {
   ...(unpainted === undefined ? { colors: theme } : {}),
   overrideColorScheme: 'dark',
-  backdrop: { scene: SCENE, glass: { blur: 18, tint: '#15131a', opacity: 0.55 } },
+  backdrop: { scene: SCENE, glass: { blur: 18, tint: '#10151e', opacity: 0.55 } },
 }
 
 const KINDS = new Set(['five_hour', 'seven_day'])
@@ -91,7 +91,7 @@ const WORD: Record<ReviewRun['phase'], string> = {
   setup: 'Gathering',
   reviewing: 'Reviewing',
   adjudicating: 'Judging',
-  done: 'Sealing',
+  done: 'Finishing',
 }
 
 const DONE = new Set(['finished', 'adjudicated'])
@@ -123,11 +123,10 @@ export function timeLeft(secs: number | undefined): string {
   return `~${Math.round(secs / 60)}m`
 }
 
-// A lantern on a pole, the keep's own sigil.
+// Two peaks, the taller one capped with snow.
 const MARK =
-  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 14"><path d="M7 1 L10 4 H4 Z" fill="#c8833a"/>' +
-  '<rect x="4.5" y="4" width="5" height="6" rx="1" fill="none" stroke="#c8833a" stroke-width="1.2"/>' +
-  '<circle cx="7" cy="7" r="1.4" fill="#f0c879"/><path d="M7 10 V13" stroke="#c8833a" stroke-width="1.2"/></svg>'
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 14"><path d="M1 12 L5 6 L7 8.5 L9.5 3 L13 12 Z" fill="#e08e6d"/>' +
+  '<path d="M9.5 3 L11 6.3 L9.7 5.6 L8.4 6.4 Z" fill="#e6ebf2"/></svg>'
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
@@ -162,7 +161,7 @@ export const register: Register = on => {
     return (
       <Svg
         source={scene({ reading: last ?? null, at })}
-        alt="A castle on a mountain crag at dusk, under a waning moon, with snow beginning to fall"
+        alt="Snow-capped mountains at twilight under a waning moon, with spruce and aspen below and a meadow in front"
         isInteractive
       />
     )
@@ -203,7 +202,7 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="row" gap={2} alignItems="center">
-        <Svg source={MARK} alt="Highkeep lantern" width={14} height={14} />
+        <Svg source={MARK} alt="Highkeep peaks" width={14} height={14} />
         <Text color="claude">{WORD[run.phase]}</Text>
         {reviewers.map(leg => (
           <Box width={16}>

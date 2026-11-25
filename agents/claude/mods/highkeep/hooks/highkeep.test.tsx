@@ -2,6 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On, SessionMeasureInput, SessionRateLimit } from 'claude-code'
 
+import { unpainted } from './register'
 import type { ReviewRun } from './review-monitor'
 import { scene, seasonOf, tintOf } from './scene'
 
@@ -14,7 +15,7 @@ const BACKDROP = {
   plugin: 'highkeep',
   component: 'Backdrop',
   requestId: 'backdrop',
-  props: { scene: 'highkeep-castle', plugin: 'highkeep', glass: { blur: 18, tint: '#15131a', opacity: 0.55 } },
+  props: { scene: 'highkeep-peaks', plugin: 'highkeep', glass: { blur: 18, tint: '#10151e', opacity: 0.55 } },
 } as const
 
 const BAND = {
@@ -100,11 +101,47 @@ test('the scene stays within the engine limits and has no pictures or fonts', ()
   }
 })
 
-test('the five-hour candle draws only when that limit exists', () => {
+test('the five-hour alpenglow draws only when that limit exists', () => {
   const withFive = scene({ reading: { windows: [{ kind: 'five_hour', pct: 10, tint: 'calm' }], at: NOW }, at: NOW })
   const without = scene({ reading: { windows: [{ kind: 'seven_day', pct: 10, tint: 'calm' }], at: NOW }, at: NOW })
-  expect(withFive).toContain('class="flame"')
-  expect(without).not.toContain('class="flame"')
+  expect(withFive).toContain('class="alpenglow"')
+  expect(without).not.toContain('class="alpenglow"')
+})
+
+const SUMMER = Date.UTC(2027, 6, 10, 12)
+const AUTUMN = Date.UTC(2026, 9, 10, 12)
+const WINTER = Date.UTC(2027, 0, 10, 12)
+const at = (when: number) => scene({ reading: null, at: when })
+
+/** How far down the far range's snow reaches: the lowest point of its caps. */
+function snowLine(svg: string): number {
+  const group = svg.match(/<g class="caps"[^>]*>(.*?)<\/g>/)?.[1] ?? ''
+  const ys = [...group.matchAll(/[ML](-?[\d.]+) (-?[\d.]+)/g)].map(m => Number(m[2]))
+
+  return Math.max(...ys)
+}
+
+test('the peaks are nearly bare in summer and snowed in for winter', () => {
+  expect(snowLine(at(WINTER))).toBeGreaterThan(snowLine(at(AUTUMN)))
+  expect(snowLine(at(AUTUMN))).toBeGreaterThan(snowLine(at(SUMMER)))
+})
+
+test('the trees follow the seasons: yellow aspens in fall, laden spruce in winter', () => {
+  const laden = 'M0 -60 L9 -42'
+  expect(at(AUTUMN)).toContain('#e8c13a')
+  expect(at(AUTUMN)).not.toContain(laden)
+  expect(at(WINTER)).toContain(laden)
+  // Bare aspens in winter: trunks with no leaves.
+  expect(at(WINTER)).not.toContain('<ellipse cy="-38"')
+})
+
+test('the meadow has flowers in summer and none under snow', () => {
+  expect(at(SUMMER)).toContain('class="stem"')
+  expect(at(WINTER)).not.toContain('class="stem"')
+})
+
+test('Desktop paints the palette', () => {
+  expect(unpainted).toBeUndefined()
 })
 
 test('session start sets the look and keeps the reading in the store', async ($, on) => {
@@ -117,7 +154,7 @@ test('session start sets the look and keeps the reading in the store', async ($,
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
 
   expect(spy.looks).toHaveLength(1)
-  expect(spy.looks[0]).toMatchObject({ overrideColorScheme: 'dark', backdrop: { scene: 'highkeep-castle' } })
+  expect(spy.looks[0]).toMatchObject({ overrideColorScheme: 'dark', backdrop: { scene: 'highkeep-peaks' } })
   expect((spy.looks[0] as { colors?: unknown }).colors).toBeDefined()
   expect(spy.writes.at(-1)).toEqual({
     windows: [
@@ -159,7 +196,7 @@ test('a malformed stored reading is ignored', async ($, on) => {
 
   const source = await backdropSource($)
   expect(source).toContain('<svg')
-  expect(source).not.toContain('class="flame"')
+  expect(source).not.toContain('class="alpenglow"')
 })
 
 test('a backdrop another mod set is left alone', async ($, on) => {

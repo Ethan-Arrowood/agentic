@@ -1,16 +1,16 @@
 # highkeep
 
-A dark look for Claude Code in the desktop and mobile apps: a castle on a mountain crag at dusk, drawn as an animated SVG behind the conversation. It follows the calendar, and it shows plan usage in the scene instead of as text.
+A dark look for Claude Code in the desktop and mobile apps: an alpine valley at twilight, drawn as an animated SVG behind the conversation. Snow-capped peaks fill the back, spruce and aspen the middle, and a meadow the front. It follows the calendar, and it shows plan usage in the scene instead of as text.
 
 ## The scene
 
-| Season | Dates | What changes |
-| --- | --- | --- |
-| Spring | Mar to May | Green and violet trees, drifting petals |
-| Summer | Jun to Aug | Deep green, slow fireflies |
-| Autumn | Sep 1 to Nov 14 | Rust and gold trees, falling leaves |
-| First snow | Nov 15 to Dec 20 | Autumn trees, light snowfall, snow settling on the ground over 15 minutes |
-| Winter | Dec 21 to Feb | Bare trees, heavier snow, deep cover |
+| Season | Dates | Peaks | Trees | Meadow |
+| --- | --- | --- | --- | --- |
+| Spring | Mar to May | Snow halfway down | Light green aspens | Wildflowers, drifting petals |
+| Summer | Jun to Aug | Nearly bare | Deep green aspens | More wildflowers, fireflies |
+| Autumn | Sep 1 to Nov 14 | Light snow | Yellow and gold aspens | Falling leaves |
+| First snow | Nov 15 to Dec 20 | Snow most of the way down | Fading aspens, dusted spruce | Light snowfall, snow settling over 15 minutes |
+| Winter | Dec 21 to Feb | Snowed in | Bare aspens, snow-laden spruce | Heavy snowfall, deep cover |
 
 All motion is slow (6 to 180 second cycles) with no flashing. With reduced motion on, every part rests in place.
 
@@ -19,14 +19,14 @@ All motion is slow (6 to 180 second cycles) with no flashing. With reduced motio
 The mod reads the `seven_day` and `five_hour` rate-limit windows from `$.session.usage()` at session start and from `session.measure` events. It keeps the last reading in `$.store`, so the scene draws right away in the next session.
 
 - **Seven-day window:** the moon wanes as you spend it. Full at 0%, dark at 100%.
-- **Five-hour window:** a candle in the keep's great window burns down. The window stays dark when your plan has no five-hour limit.
+- **Five-hour window:** alpenglow on the high peaks fades as you spend it. The peaks stay cool when your plan has no five-hour limit.
 - **Tint:** amber when you've used more of a window than its time has passed (with a one-point grace), red past 90%.
 
 The backdrop redraws only when a window moves a whole point or changes tint.
 
 ## Review row
 
-With the review-monitor (Harper's cross-model review pane) plugin loaded, a row above the prompt shows a running cross-model review: one word for the phase, a lantern mark, a bar per reviewer, and the time left. review-monitor is optional. Without it, or with no review running, there is no row.
+With the review-monitor (Harper's cross-model review pane) plugin loaded, a row above the prompt shows a running cross-model review: one word for the phase, a mountain mark, a bar per reviewer, and the time left. review-monitor is optional. Without it, or with no review running, there is no row.
 
 ## Where it draws
 

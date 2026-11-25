@@ -26,7 +26,7 @@ const LOCK_HELPER = [
   "zsystem flock -u $fd",
 ].join("\n");
 
-export type Held = { stdin: number; stdout: number };
+type Held = { stdin: number; stdout: number };
 
 // Both ends of a FIFO without blocking on open: a non-blocking reader lets
 // the writer open, and the writer lets a second, blocking reader open.

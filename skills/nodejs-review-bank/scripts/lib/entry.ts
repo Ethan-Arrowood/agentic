@@ -16,11 +16,11 @@ export const ACTIVE = new Set(["preparing", "needs-run", "ready", "stale"]);
 const USER_DISPOSITIONS = ["approved", "changes-requested", "commented", "labeled", "unlabeled", "skipped"];
 
 // The front matter, in file order.
-export const FIELDS = ["pr", "url", "title", "author", "lane", "state", "head", "pr_head", "acted_head", "created_at",
+const FIELDS = ["pr", "url", "title", "author", "lane", "state", "head", "pr_head", "acted_head", "created_at",
   "prepared_at", "presented_at", "updated_at", "my_teams", "rereview_from",
   "needs_run", "disposition", "disposition_at", "snooze_until", "lease", "note",
   "wait_since", "wait_for", "screen"] as const;
-export type Field = (typeof FIELDS)[number];
+type Field = (typeof FIELDS)[number];
 
 // Every field is a string, "-" when unset. The body is the prepared review.
 export type Entry = Record<Field, string> & { body: string };

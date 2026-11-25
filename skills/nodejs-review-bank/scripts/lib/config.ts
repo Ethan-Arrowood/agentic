@@ -37,7 +37,7 @@ function realPath(p: string): string {
 }
 
 // This file is scripts/lib/config.ts.
-export const SCRIPTS = path.dirname(path.dirname(fs.realpathSync(fileURLToPath(import.meta.url))));
+const SCRIPTS = path.dirname(path.dirname(fs.realpathSync(fileURLToPath(import.meta.url))));
 export const BANK_SCRIPT = path.join(SCRIPTS, "bank.ts");
 // The sibling skills' scripts: nodejs-review-queue and nodejs-contribute.
 export const RQ = realPath(env("RQ_SCRIPTS", path.join(SCRIPTS, "../../nodejs-review-queue/scripts")));

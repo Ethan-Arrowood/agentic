@@ -125,7 +125,7 @@ export function parseIso(s: string | null | undefined): number | null {
 // ---------------------------------------------------------------------------
 
 // \r\n and \r as \n, as every reader here expects.
-export function toLF(s: string): string {
+function toLF(s: string): string {
   return s.replace(/\r\n?/g, "\n");
 }
 
@@ -246,7 +246,7 @@ export function readTsv(name: string): string[][] {
 
 export type RunResult = { status: number; stdout: string; stderr: string; timedOut: boolean };
 type Stream = "pipe" | "inherit" | "ignore";
-export type RunOptions = {
+type RunOptions = {
   env?: NodeJS.ProcessEnv;
   cwd?: string;
   stdout?: Stream;

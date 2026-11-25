@@ -44,7 +44,7 @@ export type CandidateMeta = {
 
 // cache/ci.json: the last ci-status.sh result per cq candidate. `head` is
 // the head ci-status.sh reports, which can differ from the candidate's.
-export type CiResult = { head: string; line: string; at: string; ok: boolean };
+type CiResult = { head: string; line: string; at: string; ok: boolean };
 
 // cache/queue-attempt.json: the last team queue refresh.
 type QueueAttempt = { at: string; failures: number; error?: string };

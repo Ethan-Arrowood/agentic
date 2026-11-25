@@ -4,7 +4,7 @@ description: Continuously running companion to nodejs-review-queue that keeps a 
 metadata:
   author: Ethan Arrowood
   tags: nodejs, github, code-review, pull-requests, workflow, background
-  version: 0.1.0
+  version: 0.2.0
 allowed-tools:
   - Bash
   - Read
@@ -26,12 +26,12 @@ This skill builds on two others, which must be installed alongside it:
 1. **All of `nodejs-review-queue`'s *Hard rules* apply.** Read-only on GitHub (never post, label, review, or react). The user writes all review text, following [Human Voice](https://ai-policy.dev/policies/human-voice/1.0.0). One PR action at a time. Full upstream URLs for every PR.
 2. **Never bank an unverified finding as verified.** A subagent's draft is a lead, not a result. See [Verify](#4-verify).
 3. **One agent per slot.** Only an agent holding a slot builds, checks out, or runs anything. See [Slots](#slots).
-4. **`gh` stays serial across all agents.** Only `bank.py` calls `gh`, through a lock (`scripts/bin/gh`) with backoff on the secondary rate limit. It runs `git node metadata`, which calls GitHub itself, under the same lock. Preparing agents read the dossier and never call `gh`. GitHub's secondary rate limit trips on concurrent calls (see `nodejs-review-queue`'s *GitHub rate limits*).
+4. **`gh` stays serial across all agents.** Only `bank.ts` calls `gh`, through a lock (`scripts/bin/gh`) with backoff on the secondary rate limit. It runs `git node metadata`, which calls GitHub itself, under the same lock. Preparing agents read the dossier and never call `gh`. GitHub's secondary rate limit trips on concurrent calls (see `nodejs-review-queue`'s *GitHub rate limits*).
 5. **CI status only from the dossier**, never `gh pr checks`: Jenkins from `ci-status.sh` (`ci.txt`), GitHub Actions from `gates.json`.
 
 ## Bank on disk
 
-`scripts/bank.py` owns the bank. It lives at `$XDG_STATE_HOME/nodejs-review-bank/` (default `~/.local/state/nodejs-review-bank/`, `NODE_REVIEW_BANK` overrides). That is outside every checkout, so no `git clean` or worktree removal touches it, and both slots share it.
+`scripts/bank.ts` owns the bank. It lives at `$XDG_STATE_HOME/nodejs-review-bank/` (default `~/.local/state/nodejs-review-bank/`, `NODE_REVIEW_BANK` overrides). That is outside every checkout, so no `git clean` or worktree removal touches it, and both slots share it.
 
 | Path | Contents |
 |------|----------|
@@ -42,7 +42,7 @@ This skill builds on two others, which must be installed alongside it:
 | `archive/` | Earlier entries for a PR that came back after a new push |
 | `slots.tsv` | Slot name and checkout path, one per line |
 
-Entry front matter: `pr`, `url`, `title`, `author`, `lane`, `state`, `head` (SHA prepared against), `pr_head` (latest seen), `acted_head` (the head the user's action covered: the reviewed commit, else `head`), `created_at`, `prepared_at`, `presented_at`, `my_teams`, `rereview_from` (commit of the user's last decisive review), `needs_run` (count), `disposition`, `disposition_at`, `snooze_until`, `lease`, `note`, `wait_since` and `wait_for` (see [Holds](#holds)), `screen` (the [automation screen](#automation-screen) result). Edit fields only through `bank.py set`, `hold`, `defer`, and `unhold`.
+Entry front matter: `pr`, `url`, `title`, `author`, `lane`, `state`, `head` (SHA prepared against), `pr_head` (latest seen), `acted_head` (the head the user's action covered: the reviewed commit, else `head`), `created_at`, `prepared_at`, `presented_at`, `my_teams`, `rereview_from` (commit of the user's last decisive review), `needs_run` (count), `disposition`, `disposition_at`, `snooze_until`, `lease`, `note`, `wait_since` and `wait_for` (see [Holds](#holds)), `screen` (the [automation screen](#automation-screen) result). Edit fields only through `bank.ts set`, `hold`, `defer`, and `unhold`.
 
 **States:**
 
@@ -58,11 +58,11 @@ Entry front matter: `pr`, `url`, `title`, `author`, `lane`, `state`, `head` (SHA
 
 **Lanes**, in priority order: `screen` (PRs that failed the [automation screen](#automation-screen) or were unclear; quick, and handled by the user), `rereview-asap`, `rereview`, `cq`, `fresh` (one of the user's teams unchecked), `fresh-checked`, `skip` (the *Subsystem skip list*: inspector and diagnostics_channel). The first three are `rereview.py`'s RE-REVIEW-ASAP, RE-REVIEW, and CQ-CANDIDATE buckets. Within a lane, the most recently updated PR comes first.
 
-`bank.py list` prints the bank by priority. `bank.py show <pr>` prints one entry.
+`bank.ts list` prints the bank by priority. `bank.ts show <pr>` prints one entry.
 
 ### The dossier
 
-`bank.py prefetch` writes these to `dossier/<pr>/`, all for the head on its `ref` line:
+`bank.ts prefetch` writes these to `dossier/<pr>/`, all for the head on its `ref` line:
 
 | File | Contents |
 |------|----------|
@@ -99,22 +99,22 @@ The user's own actions don't wake a hold. A woken entry is `done` with the note 
 
 Holds come from four places:
 
-- **By hand:** `bank.py hold <pr> [--until <ISO>] [--until-reviews N] [--until-author] [note]` waits for N reviews by others (default 1, `0` for none), a push, or `--until`. `--until-author` also waits for a comment by the PR's author. It works for a candidate with no entry yet, and for an entry in any state. It makes no GitHub call, so the push condition uses the latest head the bank has seen. It drops the dossier and ref: others' reviews or a push make the old review stale anyway. `bank.py unhold <pr>` wakes it now.
-- **By [defer](#defer):** `bank.py defer <pr> <reason>` holds a PR that isn't worth reviewing yet.
-- **By sync, after a screen:** when the user acts on a `screen` entry (usually a comment asking for the policy), sync holds it on an author comment, a push, and `until` = `SCREEN_HOURS` (48) later. `bank.py hold <pr> --screen [--until <ISO>] [note]` does the same by hand.
+- **By hand:** `bank.ts hold <pr> [--until <ISO>] [--until-reviews N] [--until-author] [note]` waits for N reviews by others (default 1, `0` for none), a push, or `--until`. `--until-author` also waits for a comment by the PR's author. It works for a candidate with no entry yet, and for an entry in any state. It makes no GitHub call, so the push condition uses the latest head the bank has seen. It drops the dossier and ref: others' reviews or a push make the old review stale anyway. `bank.ts unhold <pr>` wakes it now.
+- **By [defer](#defer):** `bank.ts defer <pr> <reason>` holds a PR that isn't worth reviewing yet.
+- **By sync, after a screen:** when the user acts on a `screen` entry (usually a comment asking for the policy), sync holds it on an author comment, a push, and `until` = `SCREEN_HOURS` (48) later. `bank.ts hold <pr> --screen [--until <ISO>] [note]` does the same by hand.
 - **By sync:** when the user approves at the head and the PR can't land yet (the landing wait isn't over, or CI isn't green at the head), sync records the approval and holds the entry on one review by others, a push, and whichever landing gates are still closed. A wake by one gate leaves the other to the `cq` lane's own check.
 
-`bank.py plan --all` lists each hold as `WAIT <pr> lane=<lane>` with its conditions and note.
+`bank.ts plan --all` lists each hold as `WAIT <pr> lane=<lane>` with its conditions and note.
 
 ### Defer
 
 Some PRs aren't worth the user's time yet, because others have already said what has to happen first. Deferring holds such a PR instead of presenting it:
 
 ```bash
-scripts/bank.py defer <pr> <reason>
+scripts/bank.ts defer <pr> <reason>
 ```
 
-It holds the entry until the author comments, the head moves past the current one, someone other than the user and the author reviews it, or `DEFER_DAYS` (7) pass. The note is `defer: <reason>`. It prints one line, `DEFER #<pr>: <reason>`: relay it to the user. `bank.py unhold <pr>` reverses it. Like any hold, it works on an entry in any state, drops the dossier and ref, and frees the entry's place in `BANK_TARGET`.
+It holds the entry until the author comments, the head moves past the current one, someone other than the user and the author reviews it, or `DEFER_DAYS` (7) pass. The note is `defer: <reason>`. It prints one line, `DEFER #<pr>: <reason>`: relay it to the user. `bank.ts unhold <pr>` reverses it. Like any hold, it works on an entry in any state, drops the dossier and ref, and frees the entry's place in `BANK_TARGET`.
 
 The preparing agent's [triage](#preparing-agent-brief) proposes a defer, and the user can ask for one while an entry is presented. Defer when:
 
@@ -134,7 +134,7 @@ A tick is idempotent. Run it on a loop (see [Per-tool settings](#per-tool-settin
 ### 1. Refresh, sync, and plan
 
 ```bash
-scripts/bank.py tick
+scripts/bank.ts tick
 ```
 
 It takes a lock, so overlapping ticks exit early. Then it:
@@ -146,13 +146,13 @@ It takes a lock, so overlapping ticks exit early. Then it:
 - Syncs every open entry in one GraphQL batch: drops PRs that merged, closed, or became drafts, and PRs by the user. In nodejs, closed usually means landed (`nodejs-contribute`, *Landing*). Marks an entry `stale` when its head moved since preparation. Reads back the user's reviews, label changes, and comments since the entry was created, records them as the `disposition`, and marks the entry `done`, or `waiting` after an approval at a head that can't land yet. It checks each `waiting` entry's wake conditions (see [Holds](#holds)). A `cq` entry is also done once anyone adds the `commit-queue` label itself (not `commit-queue-squash`, `-rebase`, or `-failed`). Each entry is re-read under its lock before it's saved, so a `put`, `present`, or `set` made during the query isn't lost. An entry prefetched again during the query is left for the next sync.
 - Checks CI with `ci-status.sh` for up to 5 `cq` candidates (with no open entry, or held on `ci`) whose result is missing, for another head, or over 30 minutes old, oldest result first. A result counts for the head `ci-status.sh` reports.
 - Keeps the slots on the latest nightly image (see [Slot images](#slot-images)).
-- Prints the bank, a count of eligible candidates per lane, and `PREPARE <pr> lane=<lane>` lines: stale entries first, then new candidates in priority order, up to `BANK_TARGET` (6) active entries. A candidate is skipped while its entry is open, or when the user already acted on its current head in the same kind of lane. The cached team queue can be up to `REFRESH_MINUTES` old, so when an entry saw the PR more recently, the entry's head and state win: a PR the bank saw land or close isn't planned again. An approval in a review lane doesn't cover the commit-queue check, so the PR can still come back as `cq`. A `cq` candidate waits until CI is green at its head and the landing wait is over (see [Holds](#holds)). A held PR isn't planned. `bank.py plan --all` lists each skip with its reason, and each hold.
+- Prints the bank, a count of eligible candidates per lane, and `PREPARE <pr> lane=<lane>` lines: stale entries first, then new candidates in priority order, up to `BANK_TARGET` (6) active entries. A candidate is skipped while its entry is open, or when the user already acted on its current head in the same kind of lane. The cached team queue can be up to `REFRESH_MINUTES` old, so when an entry saw the PR more recently, the entry's head and state win: a PR the bank saw land or close isn't planned again. An approval in a review lane doesn't cover the commit-queue check, so the PR can still come back as `cq`. A `cq` candidate waits until CI is green at its head and the landing wait is over (see [Holds](#holds)). A held PR isn't planned. `bank.ts plan --all` lists each skip with its reason, and each hold.
 
 ### 2. Prepare each planned PR
 
 For each `PREPARE` line, while agents are free:
 
-1. `scripts/bank.py prefetch <pr>`: refuses a PR that is closed, merged, or a draft (exit 4), and records that as the entry's disposition, so `plan` stops offering it while the cached queue still lists it. Otherwise writes `dossier/<pr>/` and fetches the PR head to `refs/review-bank/<pr>` in `~/dev/nodejs/node` (without touching any working tree or `FETCH_HEAD`). It also fetches `upstream/main` and the `upstream/v*-staging` branches, at most every 30 minutes. It builds the new dossier and ref aside and replaces the old ones only once the fetched head matches GitHub's, before and after the dossier is built, so a failed prefetch leaves an earlier one intact. Note the head on its `ref` line: `put` needs it. Re-preparing a `stale` or `done` entry archives the earlier review and starts clean. The entry moves to `preparing`. Prefetch also runs the [automation screen](#automation-screen). A PR that doesn't pass becomes a `ready` entry in the `screen` lane with no CI or gates calls and no agent: skip steps 2 and 3 for it.
+1. `scripts/bank.ts prefetch <pr>`: refuses a PR that is closed, merged, or a draft (exit 4), and records that as the entry's disposition, so `plan` stops offering it while the cached queue still lists it. Otherwise writes `dossier/<pr>/` and fetches the PR head to `refs/review-bank/<pr>` in `~/dev/nodejs/node` (without touching any working tree or `FETCH_HEAD`). It also fetches `upstream/main` and the `upstream/v*-staging` branches, at most every 30 minutes. It builds the new dossier and ref aside and replaces the old ones only once the fetched head matches GitHub's, before and after the dossier is built, so a failed prefetch leaves an earlier one intact. Note the head on its `ref` line: `put` needs it. Re-preparing a `stale` or `done` entry archives the earlier review and starts clean. The entry moves to `preparing`. Prefetch also runs the [automation screen](#automation-screen). A PR that doesn't pass becomes a `ready` entry in the `screen` lane with no CI or gates calls and no agent: skip steps 2 and 3 for it.
 2. Decide whether it needs a slot. Most PRs don't: start read-only, and let verification ask for runs. Give a slot up front only when the claim to check is a crash or a behavior change.
 3. Start a preparing agent with the [brief](#preparing-agent-brief). Its first step is a cheap, read-only triage of the discussion. It decides review or [defer](#defer) before any build.
 
@@ -169,7 +169,7 @@ A `cq` entry needs no agent. Check the gates yourself, then `put` it:
 
 A preparing agent writes `dossier/<pr>/draft.md` and reports. Verify it before banking.
 
-An agent that triaged the PR as a defer writes no draft. It reports one line, `DEFER: <reason>`, and stops. Check the reason against `discussion.json`: the cited comment exists, and the author hasn't answered it since. Release the agent's slot if it had one, then run `bank.py defer <pr> <reason>` and relay its `DEFER` line. If the reason doesn't hold, prepare the review.
+An agent that triaged the PR as a defer writes no draft. It reports one line, `DEFER: <reason>`, and stops. Check the reason against `discussion.json`: the cited comment exists, and the author hasn't answered it since. Release the agent's slot if it had one, then run `bank.ts defer <pr> <reason>` and relay its `DEFER` line. If the reason doesn't hold, prepare the review.
 
 ### 4. Verify
 
@@ -182,7 +182,7 @@ The orchestrator verifies every draft. Check, don't trust:
 - **Label advice:** apply `nodejs-contribute`'s *Release-line labels*. Releasers add most `dont-land-on-vN.x` labels themselves, so recommend one only where that section says a reviewer's label is needed.
 - **Stale guidance:** the skills in this repo are the source of truth. A draft can cite outdated rules (an installed copy of a skill can lag a merged change). Correct it.
 
-Then bank it: `scripts/bank.py put <pr> <summary.md> --head <sha>`, with the head from the prefetch line you gave the agent (without `--head`, `put` uses the dossier's `meta.json`). `put` refuses (exit 5) when that head isn't the entry's, or the entry isn't `preparing` or `needs-run`: an agent that outlived its lease can't bank a draft for an older head, revive a done entry, or demote a presented one. Otherwise the state becomes `needs-run` if the summary's *Needs a run* section lists items, otherwise `ready`. If the head moved during preparation, `put` marks it `stale` instead.
+Then bank it: `scripts/bank.ts put <pr> <summary.md> --head <sha>`, with the head from the prefetch line you gave the agent (without `--head`, `put` uses the dossier's `meta.json`). `put` refuses (exit 5) when that head isn't the entry's, or the entry isn't `preparing` or `needs-run`: an agent that outlived its lease can't bank a draft for an older head, revive a done entry, or demote a presented one. Otherwise the state becomes `needs-run` if the summary's *Needs a run* section lists items, otherwise `ready`. If the head moved during preparation, `put` marks it `stale` instead.
 
 When a slot frees up, run the oldest `needs-run` entry's items, move the results into *Findings* or *Unverified*, and `put` it again.
 
@@ -252,7 +252,7 @@ Write the summary to <bank>/dossier/<pr>/draft.md and report.
 
 ## Reading the discussion
 
-`bank.py prefetch` writes `discussion.json` with `nodejs-review-queue`'s `discussion.sh --json <pr>`, which reads comments, reviews, and inline threads through GraphQL. `gh pr view --json comments,reviews` and the REST endpoints lack the minimized fields, so never read discussion from them. The filter:
+`bank.ts prefetch` writes `discussion.json` with `nodejs-review-queue`'s `discussion.sh --json <pr>`, which reads comments, reviews, and inline threads through GraphQL. `gh pr view --json comments,reviews` and the REST endpoints lack the minimized fields, so never read discussion from them. The filter:
 
 - Content hidden as spam, abuse, low-quality, or off-topic is dropped entirely: don't credit it, and don't treat its points as already raised.
 - Content hidden as outdated, duplicate, or resolved stays with `status: resolved-context`.
@@ -271,9 +271,9 @@ A slot is a checkout with its own devcontainer. Defaults in `slots.tsv`:
 | `2` | `~/dev/nodejs/node/.claude/worktrees/review-b` (detached at `main`) |
 
 ```bash
-scripts/bank.py slot status
-scripts/bank.py slot acquire any <pr> <agent>   # prints the slot name and path; skips checkouts with changes or a failing git status; exit 3 if none free
-scripts/bank.py slot release <slot> <pr>        # refuses while the checkout has changes, or if the slot is held for another PR
+scripts/bank.ts slot status
+scripts/bank.ts slot acquire any <pr> <agent>   # prints the slot name and path; skips checkouts with changes or a failing git status; exit 3 if none free
+scripts/bank.ts slot release <slot> <pr>        # refuses while the checkout has changes, or if the slot is held for another PR
 ```
 
 Rules:
@@ -296,7 +296,7 @@ Nothing here touches a held slot. `slot acquire any` prefers a slot on the local
 
 A moved container builds without QUIC. QUIC PRs need `QUIC=1` (`nodejs-contribute`, *Configure-time feature gating*).
 
-`bank.py image prune` removes `out/` volumes for unused images, in free slots only, through `devc.sh prune`. It matches only volumes named for a slot checkout, never other worktrees' (such as `node-devc-out-http-*`). Ask before running it.
+`bank.ts image prune` removes `out/` volumes for unused images, in free slots only, through `devc.sh prune`. It matches only volumes named for a slot checkout, never other worktrees' (such as `node-devc-out-http-*`). Ask before running it.
 
 Run recipes, from the slot's checkout:
 
@@ -338,27 +338,27 @@ After the user comments, `sync` holds the entry for 48 hours (see [Holds](#holds
 - **The author comments or pushes:** it wakes (`woke: author responded: …`) and is planned in its normal lane. The next prefetch skips the screen and records why, and it gets a real review.
 - **No response:** it comes back as a `ready` `screen` entry recommending closure per the AI use policy and the [moderation policy](https://github.com/nodejs/admin/blob/main/Moderation-Policy.md), with an outline for the closing comment. The user closes it, and sync records `closed`.
 
-Screen entries don't count toward `BANK_TARGET`. `bank.py plan --all` lists them as `SCREEN <pr> <state> <result>: <signals>`.
+Screen entries don't count toward `BANK_TARGET`. `bank.ts plan --all` lists them as `SCREEN <pr> <state> <result>: <signals>`.
 
 ## Presentation mode
 
 When the user says they're ready ("next review", "show me the bank"):
 
-1. Run `bank.py sync`, then `bank.py present`. It marks the top `ready` entry (or `needs-run` if none are ready) as presented and prints it. Snoozed entries wait. Present the summary, with the PR's full URL. A `screen` entry comes first: present its signals and the comment outline, not a review.
+1. Run `bank.ts sync`, then `bank.ts present`. It marks the top `ready` entry (or `needs-run` if none are ready) as presented and prints it. Snoozed entries wait. Present the summary, with the PR's full URL. A `screen` entry comes first: present its signals and the comment outline, not a review.
 2. Stop and wait, exactly as `nodejs-review-queue`'s *Stop and wait*. Outlines and proofreading follow that skill's step 2.
-3. When the user says they're done with it, run `bank.py sync <pr>`. If it finds their action, the entry is done. Report the recorded disposition and present the next one.
-4. If GitHub shows no action yet, say so and ask: they may not have submitted, or chose to skip. Record their answer: `bank.py set <pr> state=done disposition=skipped`, `bank.py set <pr> state=ready snooze_until=<ISO time>` for later, `bank.py hold <pr> [--until-reviews N] [--until-author] [note]` to wait for others (see [Holds](#holds)), or `bank.py defer <pr> <reason>` when it isn't worth their time yet (see [Defer](#defer)).
+3. When the user says they're done with it, run `bank.ts sync <pr>`. If it finds their action, the entry is done. Report the recorded disposition and present the next one.
+4. If GitHub shows no action yet, say so and ask: they may not have submitted, or chose to skip. Record their answer: `bank.ts set <pr> state=done disposition=skipped`, `bank.ts set <pr> state=ready snooze_until=<ISO time>` for later, `bank.ts hold <pr> [--until-reviews N] [--until-author] [note]` to wait for others (see [Holds](#holds)), or `bank.ts defer <pr> <reason>` when it isn't worth their time yet (see [Defer](#defer)).
 
 The loop keeps running meanwhile. While an entry is presented, a tick reports in one line at most, and never presents.
 
-On request, give the session roll-up from `bank.py list --all`, grouped by disposition, as in `nodejs-review-queue`'s step 4.
+On request, give the session roll-up from `bank.ts list --all`, grouped by disposition, as in `nodejs-review-queue`'s step 4.
 
 ## Per-tool settings
 
 ### Claude Code
 
 - **Loop:** start it with the `loop` skill, for example `/loop 20m run one nodejs-review-bank tick`, or with no interval to let the session pace itself.
-- **Tick:** run `~/.claude/skills/nodejs-review-bank/scripts/bank.py tick` with Bash in the background. A team queue refresh takes several minutes. Keep the `team queue:` and `tick:` lines in any summary of the output: they carry refresh failures and the backoff state.
+- **Tick:** run `~/.claude/skills/nodejs-review-bank/scripts/bank.ts tick` with Bash in the background. A team queue refresh takes several minutes. Keep the `team queue:` and `tick:` lines in any summary of the output: they carry refresh failures and the backoff state.
 - **Preparing agents:** spawn them with the Agent tool in the background, at most two holding slots and two read-only at a time. Release a slot when its agent reports, whatever the outcome.
-- **After a context reset or restart:** run `bank.py list` and `bank.py slot status`. Entries left `preparing` by a lost agent lapse to `stale` on their own. A slot held by a lost agent needs `bank.py slot release <slot> <pr>` once you've checked its checkout.
+- **After a context reset or restart:** run `bank.ts list` and `bank.ts slot status`. Entries left `preparing` by a lost agent lapse to `stale` on their own. A slot held by a lost agent needs `bank.ts slot release <slot> <pr>` once you've checked its checkout.
 - **Permissions:** see *Permissions for the Node.js skills* in this repo's `agents/claude/README.md`.

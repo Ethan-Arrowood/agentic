@@ -1,6 +1,6 @@
 #!/bin/zsh
 # gh shim: runs the real gh with a cross-process lock, so every gh call made
-# through bank.py (including build-queue.sh, rereview.py, discussion.sh, and
+# through bank.ts (including build-queue.sh, rereview.py, discussion.sh, and
 # ci-status.sh, which it runs with this directory first on PATH) is serial,
 # with at least GH_MIN_GAP seconds between calls. GitHub's secondary rate
 # limit trips on concurrent or bursty calls. The lock is a flock, which the
